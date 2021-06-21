@@ -1,5 +1,4 @@
 
-import matplotlib
 import pandas as pd
 import os
 import torch
@@ -8,16 +7,10 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib import patches
 from torch.utils import data
-from torch.utils.data import TensorDataset,DataLoader
+from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchtext.data.utils import get_tokenizer
 from torchvision import models
-
-from sklearn.decomposition import PCA,IncrementalPCA
-from sklearn.preprocessing import StandardScaler,normalize
-import sklearn
-import nltk
-from nltk.stem import WordNetLemmatizer
 from nltk.corpus import wordnet
 
 import numpy as np

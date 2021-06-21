@@ -1,17 +1,12 @@
-from torchvision import models
-import torchvision
 import torch
 from torch import nn
 from torch.utils.data import Dataset,DataLoader
 import torchvision.transforms as transforms
 from torchtext.data.utils import get_tokenizer
-import matplotlib.pyplot as plt
 import numpy as np
 
 import pickle
-import gc
 from tqdm import tqdm
-import pandas as pd
 
 class LexiconDataset(Dataset):
     def __init__(self,image_features,predicates,predicates_table):
@@ -28,7 +23,6 @@ class LexiconDataset(Dataset):
                "label": self.labels[idx]}
 
         return datum
-
 
 
 class WorldModel(nn.Module):
@@ -153,20 +147,19 @@ def train_lexicon_model(pixie_dim, device, data_path):
     Y = pickle.load(open(data_path+"y_preprocessed.p", "rb")).reshape(-1)
     r=torch.randperm(X.shape[0])    
     split_pos = int(X.shape[0]*0.8)
-    X_train = X[r][:split_pos]
-    Y_train = Y[r][:split_pos]
-    X_dev = X[r][split_pos:]
-    Y_dev = Y[r][split_pos:]
+    X_train, Y_train = X[r][:split_pos], Y[r][:split_pos]
+    X_dev, Y_dev = X[r][split_pos:], Y[r][split_pos:]
+
     train_dataset = LexiconDataset(X_train,Y_train,predicates_table)
     valid_dataset = LexiconDataset(X_dev,Y_dev,predicates_table)
 
-    batch_size = 1000
+    batch_size = 1024
     train_loader = DataLoader(dataset=train_dataset,batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(dataset=valid_dataset,batch_size=batch_size,shuffle=True) 
 
     learning_rate = 0.01
     decay_rate = 0.00000000001
-    epoch_num = 30
+    epoch_num = 10
     loss_func = BCELossForLexiconModel()
 
     lexmodel = LexiconModel(pixie_dim, predicate_size)
