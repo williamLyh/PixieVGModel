@@ -1,4 +1,3 @@
-
 import pandas as pd
 import os
 import torch
@@ -6,7 +5,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib import patches
-from torch.utils import data
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchtext.data.utils import get_tokenizer
@@ -16,132 +14,234 @@ from nltk.corpus import wordnet
 import numpy as np
 import pickle
 from tqdm import tqdm
+import json
+import zipfile
+from collections import Counter
 
 
-def load_VG_data(VG_path):
-    relations = pd.read_json(VG_path+'relationships.json')
+def load_VG_data(rel_path):
+    relations = pd.read_json(rel_path)
     return relations
 
-def features_extraction(relations, VG_path, save_path):
+def load_VG_obj(obj_path):
+    objects = pd.read_json(obj_path)
+    return objects
+
+def clean_string(s):
+    return s.strip().replace(' ','|').lower()
+
+def generate_objects_vocab(obj_path, min_freq=100):
+    print('generating object filtering checklist')
+    all_objects={}
+    zfile = zipfile.ZipFile(obj_path)
+    for finfo in zfile.infolist():
+        ifile=zfile.open(finfo)
+        data = json.loads(ifile.read().decode('utf-8'))
+        for image in data:
+            for obj in image['objects']:
+                objects = obj['synsets']
+                objects_id = obj['object_id']
+                # There could be more than 1 objet referring to 1 object_id 
+                all_objects[objects_id] = [item[:-3] for item in objects]
+
+    # some object_id refers to empty value, filter them:
+    clean_all_objects = {}
+    for obj_id, obj in all_objects.items():
+        if obj != []:
+            clean_all_objects[obj_id] = obj 
+
+    # creat objects checklist by setting a min freq threshold
+    objects_list = np.concatenate(list(clean_all_objects.values()))
+    object_counts = Counter(objects_list)
+    filtered_objects_counts = {}
+    for object, count in object_counts.items():
+        if count>min_freq:
+            filtered_objects_counts[object] = count
+
+    return filtered_objects_counts, clean_all_objects
+
+def generate_rels_checklist(rel_path, filtered_objects_list, all_objects, min_freq=100):
+    print('generating relation filtering checklist')
+    relation_tokens = []
+    zfile = zipfile.ZipFile(rel_path)
+    unknown_failure_cnt=0
+    key_absent_cnt = 0
+    relation_cnt = 0
+    all_objects_keys = set(all_objects.keys())
+    for finfo in zfile.infolist():
+        ifile = zfile.open(finfo)
+        data = json.loads(ifile.read().decode('utf-8'))
+        for rels in tqdm(data):
+            for rel in rels['relationships']:
+                # count single relation token 
+                if len(rel['predicate']) > 0:
+                    pred = clean_string(rel['predicate'])
+                else:
+                    continue
+
+                subj_id = rel['subject']['object_id']
+                try:
+                    # Problems of preprocessing in EVA
+                    # 1) filter out if not in all_objects
+                    # some rels have synset, but the object_id is not in all_objects
+                    # They are also filtered in EVA.
+                    # The number could be around 0.4M
+                    # 2) Sometimes all_objects contains the key, but has empty list 
+                    for subj in all_objects[subj_id]:
+                        if subj in filtered_objects_list:
+                            relation_tokens.append((subj,pred))
+                    relation_cnt += 1
+                except:
+                    if subj_id not in all_objects_keys:
+                        key_absent_cnt +=1
+                    else:
+                        unknown_failure_cnt+=1
+                        print(rel)
+                    pass
+
+                obj_id = rel['object']['object_id']
+                try:
+                    for obj in all_objects[obj_id]:
+                        if obj in filtered_objects_list:
+                            relation_tokens.append((pred,obj))
+                    relation_cnt += 1
+                except:
+                    if obj_id not in all_objects_keys:
+                        key_absent_cnt +=1
+                    else:
+                        unknown_failure_cnt+=1
+                        print(rel)
+                    pass
+    print('unknown_failure_cnt: ', unknown_failure_cnt)
+    print('key_absent_cnt: ', key_absent_cnt)
+    print('include_relation_cnt: ', relation_cnt)
+
+    # filter relations by frequency
+    rels_counts = Counter(relation_tokens)
+    rels_checklist = []
+    for rel_token, count in rels_counts.items():
+        if count > min_freq:
+            rels_checklist.append((rel_token))
+
+    return rels_checklist, relation_tokens
+
+def filter_relations(rel_path, save_path, device, all_objects, rels_checklist):
     def crop_image(img,obj):
         return img[obj['y']:obj['y']+obj['h'],
                    obj['x']:obj['x']+obj['w'],:]
-
-    transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Resize((224,224)),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
-        ])
+    print('extracting relations and images')
 
     resnet = models.resnet101(pretrained=True)
     resnet.to(device)
     resnet.eval()
     Image_batch_size = 20000
     data_cut = 3000
+    # relations_len = relations.shape[0]
 
-    relations_len = relations.shape[0]
-    ## corp and transform images:
-    for file_cnt, relations_start_point in enumerate(range(0,relations_len, data_cut)):
-        relations_end_point = min(relations_start_point+data_cut, relations_len)
-        X,Y = [],[]
-        for i in tqdm(range(relations_start_point,relations_end_point)):
-
-            img_id = relations.iloc[i]['image_id']
-            path_folder1 = VG_path+'VG_100K/{}.jpg'.format(img_id)
-            path_folder2 = VG_path+'VG_100K_2/{}.jpg'.format(img_id)
-            path = path_folder1 if os.path.isfile(path_folder1) else path_folder2
-
-            img_pred = mpimg.imread(path)
+    zfile = zipfile.ZipFile(rel_path)
+    X, Y=[], []
+    save_point = 10000
+    save_point_idx = 0
+    image_damage_cnt, object_id_absent_cnt, unknown_skip_cnt, relation_cnt = 0, 0, 0, 0
+    all_objects_keys = set(all_objects.keys())
+    for finfo in zfile.infolist():
+        ifile = zfile.open(finfo)
+        data = json.loads(ifile.read().decode('utf-8'))
+        for idx, rels in tqdm(enumerate(data),total=len(data)):
+            img_id = rels['image_id']
+            image_path1 = VG_path+'VG_100K/{}.jpg'.format(img_id)
+            image_path2 = VG_path+'VG_100K_2/{}.jpg'.format(img_id)
+            image_path = image_path1 if os.path.isfile(image_path1) else image_path2
+            img_pred = mpimg.imread(image_path)
+            # filter if image is not damaged
             if len(img_pred.shape)<3:
+                image_damage_cnt+=len(rels['relationships'])
                 continue
 
-            for relation in relations.iloc[i]['relationships']:
-                if relation['synsets']==[]:
-                    if relation['predicate']=='':
-                        continue
-                    else:
-                        name_pred = [relation['predicate']]
+
+            for rel in rels['relationships']:
+                img_subj = crop_image(img_pred, rel['subject'])
+                img_obj = crop_image(img_pred, rel['object'])
+
+                if len(rel['predicate']) > 0:
+                    # skip if there are more predicates for the relation
+                    pred = clean_string(rel['predicate'])
                 else:
-                    name_pred = [term.split('.')[0] for term in relation['synsets']]
-                    
-                #### subj
-                if relation['subject']['synsets']==[]:
-                    subj = relation['subject']['name'] if 'name' in relation['subject'] else relation['subject']['names'][0]
-                    if subj=='':
-                        continue
-                    else:
-                        subjs = subj.split(' ')
-                        name_subj = []
-                        for term in subjs:
-                            if wordnet.synsets(term)!=[]:
-                                name_subj.append(wordnet.synsets(term)[0].name().split('.')[0])
-                            else:
-                                continue
-                        if len(name_subj)==0:
-                            continue
-                else:
-                    name_subj = [term.split('.')[0] for term in relation['subject']['synsets']]
-                    
-                #### obj
-                if relation['object']['synsets']==[]:
-                    obj = relation['object']['name'] if 'name' in relation['object'] else relation['object']['names'][0]
-                    if obj=='':
-                        continue
-                    else:
-                        objs = obj.split(' ')
-                        name_obj = []
-                        for term in objs:
-                            if wordnet.synsets(term)!=[]:
-                                name_obj.append(wordnet.synsets(term)[0].name().split('.')[0])
-                            else:
-                                continue
-                        if len(name_obj)==0:
-                            continue
-                else:
-                    name_obj = [term.split('.')[0] for term in relation['object']['synsets']]
-                    
-                img_subj = crop_image(img_pred,relation['subject'])
-                img_obj = crop_image(img_pred,relation['object'])
+                    continue
 
                 if (0 in img_subj.shape) or (0 in img_obj.shape):
+                    # skip if the image is not exist
                     continue
-                for s in name_subj:
-                    for p in name_pred:
-                        for o in name_obj:
-                            X.append([img_pred, img_subj, img_obj])
-                            Y.append([p, s, o])
 
-        print('X length:', len(X))
+                # id could be not in all_objects keys
+                # id could refer to empty list in all_objects
+                subj_id = rel['subject']['object_id']
+                obj_id = rel['object']['object_id']
+                try:
+                    for subj in all_objects[subj_id]:
+                        if (subj,pred) in rels_checklist:
+                            for obj in all_objects[obj_id]:
+                                if (pred, obj) in rels_checklist:
+                                    
+                                    X.append([img_pred, img_subj, img_obj])
+                                    Y.append([pred, subj.split('.')[0], obj.split('.')[0]])
+                                    relation_cnt +=1
+                except:
+                    if (subj_id not in all_objects_keys) or (obj_id not in all_objects_keys):
+                        object_id_absent_cnt +=1
+                    else:
+                        unknown_skip_cnt +=1
+                        print(rel)
+            
+            if idx!=0 and (idx%save_point)==0:
+                # run CNN feature extraction function
+                # save parameters
+                print('CNN extraction')
+                # print(len(X))
+                X = CNN_feature_extraction(X,resnet,device)
+                print('saving data part {}'.format(save_point_idx))
+                pickle.dump(X, open(save_path+"x_{}.p".format(save_point_idx), "wb"))
+                pickle.dump(Y, open(save_path+"y_{}.p".format(save_point_idx), "wb"))
+                X, Y=[],[]
+                save_point_idx+=1
 
-        X_batch = []
-        for start_point in tqdm(range(0,len(X),Image_batch_size)):
-            end_point = start_point+Image_batch_size if start_point+Image_batch_size<len(X) else len(X) 
+    print('unknown_failure_cnt: ', unknown_skip_cnt)
+    print('key_absent_cnt: ', object_id_absent_cnt)
+    print('include_relation_cnt: ', relation_cnt)
+    
 
-            X_transformed = []
-            print('image transforming')
-            for row in X[start_point:end_point]:
-                X_transformed += [transform(img) for img in row]
-            X_transformed = torch.cat(X_transformed).reshape((-1,3,224,224)) # the X_transformed is 10000*3*224*224
 
-            x_loader = DataLoader(X_transformed,batch_size=500)
-            del X_transformed
-            with torch.no_grad():     # have to use no_grad() otherwise there will be memory leck
-                output = []
-                print('passing CNN')
-                for x_batch in x_loader:
-                    output_batch = resnet(x_batch.to(device))
-                    output.append(output_batch)
-                    
-            del x_loader
-            X_batch.append(torch.cat(output).cpu().reshape((-1,3,1000)))
-            del output
+def CNN_feature_extraction(X, resnet, device):
+    # tranforming step reqires large Mem, have to split the processing into steps to stabalized the mem required
+    transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Resize((224,224)),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+    image_batch_size = 10000
+    output=[]
 
-        print('saving data')
-        pickle.dump(torch.Tensor(np.concatenate(X_batch)), open(save_path+"x_{}.p".format(file_cnt), "wb"))
-        pickle.dump(Y, open(save_path+"y_{}.p".format(file_cnt), "wb"))
-        del X_batch
-        # del Y_flat
+    for start_point in range(0,len(X),image_batch_size):
+        end_point = start_point+image_batch_size if start_point+image_batch_size<len(X) else len(X) 
+        X_transformed = []
+        for img_triple in X[start_point:end_point]:
+            X_transformed.append(torch.stack([transform(img) for img in img_triple]))  # append dimension 3*3*244*224
+        X_transformed = torch.cat(X_transformed) # flatten the shape to (-1,3,224,224) to pass the CNN
+
+        x_loader = DataLoader(X_transformed, batch_size = 1024)
+        del X_transformed
+
+        resnet.to(device)
+        resnet.eval()
+        with torch.no_grad():
+            for x_batch in x_loader:
+                output_batch = resnet(x_batch.to(device))
+                output.append(output_batch)
+        del x_loader
+
+    return torch.cat(output).cpu().reshape(-1,3,1000)
+           
 
 def generate_vocab(path):
     predicate_list = []
@@ -159,7 +259,7 @@ def features_PCA(work_path,pixie_dim_new):
     pixie_dim = 1000
     cov_global = torch.zeros(pixie_dim,pixie_dim)
     data_size = 0
-    batch_number = 37
+    batch_number = 10
 
     for itr in tqdm(range(batch_number)):
         x_hidden = pickle.load(open(work_path+"pixie_data/x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
@@ -180,24 +280,20 @@ def features_PCA(work_path,pixie_dim_new):
     # PCA transforming 
     x_batch = []
     y_batch = []
-    # batch_cnt = 0
     for itr in tqdm(range(batch_number)):
         x_hidden = pickle.load(open(work_path+"pixie_data/x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
         Y_flat = pickle.load(open(work_path+"pixie_data/y_{}.p".format(itr), "rb"))
-
         x_pca = x_hidden.reshape(-1,pixie_dim).numpy().dot(PCA_transform_matrix)
         x = x_pca/(0.4*np.sqrt(x_eigenval[:pixie_dim_new]))
         x_batch.append(torch.Tensor(x))
         y_batch.append(Y_flat)
 
-        # if (np.mod(itr,20)==0 and itr!=0) or itr == batch_number-1:
     x_batch = torch.cat(x_batch)
     y_batch = np.concatenate(y_batch)
     
     pickle.dump(x_batch.reshape(-1,3,pixie_dim_new), open(work_path+"pixie_data/data_pca/x_preprocessed.p", "wb"))
     pickle.dump(y_batch, open(work_path+"pixie_data/data_pca/y_preprocessed.p", "wb"))
             
-    # batch_cnt += 1
 
 def plot_example(idx, re_idx,work_path, relations):
     img_id = relations.iloc[idx]['image_id']
@@ -227,14 +323,19 @@ def plot_example(idx, re_idx,work_path, relations):
     # plot_example(4,8, relations)
 
 if __name__ == '__main__':
+    from PIL import Image
     print('Processing the Visual Genome data')
     VG_path = '/local/scratch/yl535/visualgeno/'
+    obj_path = VG_path+'objects.json.zip'
+    rel_path = VG_path+'relationships.json.zip'
+    save_path = '/local/scratch/yl535/pixie_data/'
     work_path = '/local/scratch/yl535/'
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    relations = load_VG_data(VG_path)
-    features_extraction(relations,VG_path,save_path=work_path+'pixie_data')
-    # plot_example(4,8,work_path, relations)
-    # predicate_list, predicates_table = generate_vocab(work_path)
     
+
+    # filtered_objects_counts, all_objects = generate_objects_vocab(obj_path)
+    # rels_checklist, _ = generate_rels_checklist(rel_path, list(filtered_objects_counts.keys()), all_objects)
+    # filter_relations(rel_path, save_path, device, all_objects, rels_checklist)
+
     features_PCA(work_path,pixie_dim_new=20)
+

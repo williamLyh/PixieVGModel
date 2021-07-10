@@ -7,6 +7,7 @@ import torchvision.transforms as transforms
 from torchtext.data.utils import get_tokenizer
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy import stats
 
 import pickle
 import gc
@@ -64,7 +65,7 @@ def load_relpron(data_path):
     return pixie_preds, test_pred, POS, np.unique(vocab)
 
 def load_men(data_path):
-    path_men = data_path+'MEN/MEN_dataset_lemma_form.test'
+    path_men = data_path+'MEN/MEN_dataset_lemma_form_full'
     pixie_pred,test_pred,scores, POS = [], [], [],[]
     with open(path_men) as f:
         for line in f:
@@ -157,36 +158,41 @@ def filter_data(pixie_pred, test_pred, scores, POS=None):
 
 
 def evaluate_men(data_path, device):
+    def renormalize(pred, score):
+        range1 = max(pred)-min(pred)
+        range2 = max(score)- min(score)
+        renormalized_pred = [round((val-min(pred))*range2/range1) + min(score) for val in pred]
+        return renormalized_pred
+
     pixie_pred, test_pred, POS, scores = load_men(data_path)
     covered_pixies, covered_preds, covered_scores, covered_POS = filter_data(pixie_pred,test_pred,scores, POS)
-    _ = perform_variational_inference(device, covered_pixies, covered_preds, covered_scores, covered_POS)
-    return covered_pixies, covered_preds, covered_POS, covered_scores
+    pred_rank = perform_variational_inference(device, covered_pixies, covered_preds, covered_scores, covered_POS)
+    renormalized_pred_rank = renormalize(pred_rank, covered_POS)
+    correlation = stats.spearmanr(renormalized_pred_rank, covered_POS).correlation
+    print("Spearman correlation score: {}".format(correlation))
+    
 
 def perform_variational_inference(device, pixies, preds, scores, POS):
     print("Performing Variational Inference")
-    pixie_dim, lr, dr, epoch_num = 20, 0.05, 0.0000000001, 400
+    pixie_dim, lr, dr, epoch_num = 20, 0.1, 0.005, 600
     model_path = ''
     W_mu, W_cov, V = load_trained_model(model_path, device)
     loss_history_list = []
     pred_rank = []
-
-    for p1,p2,pos in zip(pixies, preds, POS):
-        model = VariationalInferenceModel(pixie_dim)
+    for p1,p2,pos in tqdm(zip(pixies, preds, POS),total=len(pixies)):
+        model = VariationalInferenceModel(pixie_dim)   # here depends on the dataset
         model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay = dr)
-        
         loss_history = []
         for epoch in range(epoch_num):
-            # if np.mod(30,epoch)==0 & epoch!=0:
-            #     lr = lr *0.3
-            #     optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay = dr)
+            if np.mod(30,epoch)==0 & epoch!=0:
+                lr = lr *0.4
+                optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay = dr)
 
             q_mu, q_cov = model()
             optimizer.zero_grad()
-
             W_mu_pos = W_mu[pixie_dim*pos:pixie_dim*(pos+1)]
             W_cov_pos = W_cov[pixie_dim*pos:pixie_dim*(pos+1),pixie_dim*pos:pixie_dim*(pos+1)]
-
                 
             Dqp = -torch.log(torch.det(q_cov))  \
                 + torch.sum(torch.mul((q_mu-W_mu_pos).T, torch.matmul(torch.inverse(W_cov_pos),(q_mu-W_mu_pos).T))) \
@@ -194,26 +200,23 @@ def perform_variational_inference(device, pixies, preds, scores, POS):
             
             pred_loss = approx_E_log_sig(q_mu, q_cov, torch.unsqueeze(V[p1],0)) \
                         - torch.log(torch.sum(approx_E_sig(q_mu, q_cov, V)))
-
-    #         pred_loss = torch.log(approx_E_sig(q_mu,q_cov, torch.unsqueeze(V[x1],0))) 
-    #                     - torch.log(torch.sum(approx_E_sig(q_mu, q_cov, V)))
         
-            loss = 0.1*Dqp - pred_loss
-            
+            loss = 0.01*Dqp - pred_loss
             loss.backward()
             optimizer.step()  
             loss_history.append(loss.item())
-        
+        print(Dqp.item(), pred_loss.item())
+
         loss_history_list.append(loss_history)
         # evaluation
         truth = approx_E_sig(q_mu, q_cov, torch.unsqueeze(V[p2],0)).item()
-        
-        sorted_truth,truth_index = torch.sort(approx_E_sig(q_mu, q_cov, V).cpu().detach(), descending=True)
-        truth_rank = (truth_index == p2).nonzero().item()  # give rank index
+        all_truths = approx_E_sig(q_mu, q_cov, V).cpu().detach()
+        sorted_truth,truth_index = torch.sort(all_truths, descending=True)
+        truth_rank = torch.nonzero(truth_index == p2).item()  # give rank index
         
         pred_rank.append(truth_rank)
-        print(pred_rank)
-        assert False
+        # print(truth, truth_rank, p1, p2)
+
     return pred_rank
 
     
@@ -221,15 +224,15 @@ def perform_variational_inference(device, pixies, preds, scores, POS):
 if __name__ == '__main__':
     data_path = "/local/scratch/yl535/"
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    # X_eval, Y_eval, POS, scores = load_gs11(data_path)
+    # X_eval, Y_eval, POS, scores = load_men(data_path)
     # X_eval, Y_eval, scores = load_gs11(data_path)
 
     # print(X_eval[0])
     # print(Y_eval[0])
     # print(np.unique(POS))
-    # print(scores)
+    # print(max(scores), min(scores))
 
     # covered_pixies, covered_preds, covered_POS, covered_scores = evaluate_men(data_path)
     # print(covered_pixies, covered_preds,covered_scores)
-
+    predicate_list, predicates_table = generate_vocab(data_path+'pixie_data/data_pca/')   
     evaluate_men(data_path, device)

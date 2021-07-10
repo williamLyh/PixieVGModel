@@ -84,21 +84,36 @@ class LexiconModel(nn.Module):
         prob = torch.div(truth, torch.sum(truth_all,1))
         return truth, prob,truth_all
     
-class BCELossForLexiconModel(nn.Module):
-    def __init__(self,mode='BCE'):
-        super(BCELossForLexiconModel,self).__init__()
+class LossForLexiconModel(nn.Module):
+    def __init__(self, mode='BCE', lr=0.1, dr=0.000000001, epoch_num=30):
+        super(LossForLexiconModel,self).__init__()
         self.BCEcriterion = nn.BCELoss(reduction='mean')
         self.mode = mode
-
-    def forward(self,truth,prob, all_truth, y_target):
-        y_target_flat = torch.zeros_like(all_truth)
-        for idx,pos in enumerate(y_target):
-            y_target_flat[idx,pos]=1    
-
         if self.mode == 'BCE':
+            self.lr = 0.05
+            self.dr = 0.00000000001
+            self.epoch_num = 30
+        elif self.mode =='ML':
+            self.lr = 0.1
+            self.dr = 0.000001
+            self.epoch_num = 80
+        else:
+            self.lr = lr
+            self.dr = dr
+            self.epoch_num = epoch_num 
+            print('customized hyper-parameters') 
+
+
+    def forward(self, truth, prob, all_truth, y_target):
+        if self.mode == 'BCE':
+            y_target_flat = torch.zeros_like(all_truth)
+            for idx,pos in enumerate(y_target):
+                y_target_flat[idx,pos]=1    
             pred_loss = self.BCEcriterion(all_truth, y_target_flat)
         elif self.mode =='ML':
-            pred_loss = torch.sum(-torch.log(truth))*1.5 + torch.sum(- torch.log(prob))
+            # print(torch.sum(-torch.log(truth+0.01)).item(),torch.sum(- torch.log(prob+0.01)).item())
+            # pred_loss = torch.sum(-torch.log(truth)) + torch.sum(- torch.log(prob))
+            pred_loss=torch.sum(- torch.log(prob))
             pred_loss = pred_loss/y_target.shape[0]
         else:
             print("Loss function unrecognized")
@@ -116,16 +131,16 @@ def train_world_model(pixie_dim, num_semroles,data_path):
     world_model = WorldModel(pixie_dim, num_semroles)
     x = pickle.load(open(data_path+"x_preprocessed.p", "rb"))
     mu_batch, cov_batch = world_model.estimate_parameters(torch.Tensor(x).reshape(-1,3*pixie_dim))
-    world_model.modify_conditional_independecy(pixie_dim)
+    world_model.modify_conditional_independecy()
 
     pickle.dump([world_model.W_mu.cpu().detach(), world_model.W_cov.cpu().detach()],
                  open("world_parameters.p", "wb"))
 
 # train Lexicon model:
-def evluate_lexicon_model(test_loader, lexmodel):
+def evluate_lexicon_model(test_loader, lexmodel, loss_mode='ML'):
     lexmodel.eval()
     loss_all=0
-    loss_func = BCELossForLexiconModel()
+    loss_func = LossForLexiconModel(loss_mode)
 
     # data_size = 0
     for idx, test_batch in enumerate(test_loader):
@@ -139,14 +154,15 @@ def evluate_lexicon_model(test_loader, lexmodel):
     loss_average = loss_all/len(test_loader)
     return loss_average
 
-def train_lexicon_model(pixie_dim, device, data_path):
+def train_lexicon_model(pixie_dim, device, data_path, save_path="Lexical_parameters.p", loss_mode='ML'):
     predicate_list, predicates_table = generate_vocab(data_path)
     predicate_size = len(predicate_list)
 
     X = pickle.load(open(data_path+"x_preprocessed.p", "rb")).reshape(-1,pixie_dim)
     Y = pickle.load(open(data_path+"y_preprocessed.p", "rb")).reshape(-1)
     r=torch.randperm(X.shape[0])    
-    split_pos = int(X.shape[0]*0.8)
+    split_ratio = 0.9
+    split_pos = int(X.shape[0]*split_ratio)
     X_train, Y_train = X[r][:split_pos], Y[r][:split_pos]
     X_dev, Y_dev = X[r][split_pos:], Y[r][split_pos:]
 
@@ -160,15 +176,15 @@ def train_lexicon_model(pixie_dim, device, data_path):
     learning_rate = 0.01
     decay_rate = 0.00000000001
     epoch_num = 10
-    loss_func = BCELossForLexiconModel()
+    loss_func = LossForLexiconModel(loss_mode)
 
     lexmodel = LexiconModel(pixie_dim, predicate_size)
     lexmodel.to(device)
 
-    optimizer = torch.optim.Adam(lexmodel.parameters(), lr=learning_rate, weight_decay = decay_rate)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
+    optimizer = torch.optim.Adam(lexmodel.parameters(), lr=loss_func.lr, weight_decay = loss_func.dr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=6, gamma=0.4)
 
-    for epoch in range(epoch_num):
+    for epoch in range(loss_func.epoch_num):
         lexmodel.train()
         train_loss_all = 0
         for batch in tqdm(train_loader):
@@ -178,11 +194,6 @@ def train_lexicon_model(pixie_dim, device, data_path):
             truth, truth_all, prob = lexmodel(x_feature.to(device), y_label.to(device))
 
             pred_loss = loss_func(truth,prob,truth_all,y_label.to(device))
-            # pred_loss = torch.sum(-torch.log(truth))*1.5 + torch.sum(- torch.log(prob))
-            # # print(torch.sum(-torch.log(truth)).item(),torch.sum(- torch.log(prob)).item())
-
-            # pred_loss = pred_loss/x_feature.shape[0]
-#             pred_loss = torch.sum( - torch.log(prob+0.01))
 
             pred_loss.backward()
             optimizer.step()  
@@ -191,24 +202,25 @@ def train_lexicon_model(pixie_dim, device, data_path):
         scheduler.step()
 
         lexmodel.eval()
-        valid_loss_average = evluate_lexicon_model(valid_loader, lexmodel)
+        valid_loss_average = evluate_lexicon_model(valid_loader, lexmodel, loss_mode)
         print("==========================================")
         print("epoch: ", epoch+1)
         print("lr: ", scheduler.get_lr())
         print("train loss:", train_loss_average)
         print("validation loss: ",valid_loss_average)
 
-    pickle.dump(lexmodel.V.cpu().detach(), open("Lexical_parameters.p", "wb"))
+    pickle.dump(lexmodel.V.cpu().detach(), open(save_path, "wb"))
 
 
 if __name__ == '__main__':
     work_path = '/local/scratch/yl535/'
     data_path = work_path+'pixie_data/data_pca/'
+    save_path_lexicon = 'Lexical_parameters.p'
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     pixie_dim = 20
     num_semroles = 2
-    # train_world_model(pixie_dim, num_semroles,data_path)
+    train_world_model(pixie_dim, num_semroles,data_path)
     # predicate_list, predicates_table = generate_vocab(data_path)
-    train_lexicon_model(pixie_dim, device, data_path)
+    train_lexicon_model(pixie_dim, device, data_path, save_path_lexicon)
 
