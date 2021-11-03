@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from torchtext.data.utils import get_tokenizer
 from torchvision import models
-from nltk.corpus import wordnet
 
 import numpy as np
 import pickle
@@ -17,6 +16,8 @@ from tqdm import tqdm
 import json
 import zipfile
 from collections import Counter
+import argparse
+
 
 
 def load_VG_data(rel_path):
@@ -30,7 +31,7 @@ def load_VG_obj(obj_path):
 def clean_string(s):
     return s.strip().replace(' ','|').lower()
 
-def generate_objects_vocab(obj_path, min_freq=100):
+def generate_objects_vocab(obj_path, min_freq=30):
     print('generating object filtering checklist')
     all_objects={}
     zfile = zipfile.ZipFile(obj_path)
@@ -60,7 +61,7 @@ def generate_objects_vocab(obj_path, min_freq=100):
 
     return filtered_objects_counts, clean_all_objects
 
-def generate_rels_checklist(rel_path, filtered_objects_list, all_objects, min_freq=100):
+def generate_rels_checklist(rel_path, filtered_objects_list, all_objects, min_freq=30):
     print('generating relation filtering checklist')
     relation_tokens = []
     zfile = zipfile.ZipFile(rel_path)
@@ -125,7 +126,7 @@ def generate_rels_checklist(rel_path, filtered_objects_list, all_objects, min_fr
 
     return rels_checklist, relation_tokens
 
-def filter_relations(rel_path, save_path, device, all_objects, rels_checklist):
+def filter_relations(rel_path, data_path, device, all_objects, rels_checklist):
     def crop_image(img,obj):
         return img[obj['y']:obj['y']+obj['h'],
                    obj['x']:obj['x']+obj['w'],:]
@@ -134,8 +135,6 @@ def filter_relations(rel_path, save_path, device, all_objects, rels_checklist):
     resnet = models.resnet101(pretrained=True)
     resnet.to(device)
     resnet.eval()
-    Image_batch_size = 20000
-    data_cut = 3000
     # relations_len = relations.shape[0]
 
     zfile = zipfile.ZipFile(rel_path)
@@ -158,7 +157,6 @@ def filter_relations(rel_path, save_path, device, all_objects, rels_checklist):
                 image_damage_cnt+=len(rels['relationships'])
                 continue
 
-
             for rel in rels['relationships']:
                 img_subj = crop_image(img_pred, rel['subject'])
                 img_obj = crop_image(img_pred, rel['object'])
@@ -179,13 +177,11 @@ def filter_relations(rel_path, save_path, device, all_objects, rels_checklist):
                 obj_id = rel['object']['object_id']
                 try:
                     for subj in all_objects[subj_id]:
-                        if (subj,pred) in rels_checklist:
-                            for obj in all_objects[obj_id]:
-                                if (pred, obj) in rels_checklist:
-                                    
-                                    X.append([img_pred, img_subj, img_obj])
-                                    Y.append([pred, subj.split('.')[0], obj.split('.')[0]])
-                                    relation_cnt +=1
+                        for obj in all_objects[obj_id]:
+                            if ((subj,pred) in rels_checklist) or ((pred, obj) in rels_checklist):
+                                X.append([img_subj, img_pred, img_obj])
+                                Y.append([subj.split('.')[0], pred, obj.split('.')[0]])
+                                relation_cnt +=1
                 except:
                     if (subj_id not in all_objects_keys) or (obj_id not in all_objects_keys):
                         object_id_absent_cnt +=1
@@ -200,8 +196,8 @@ def filter_relations(rel_path, save_path, device, all_objects, rels_checklist):
                 # print(len(X))
                 X = CNN_feature_extraction(X,resnet,device)
                 print('saving data part {}'.format(save_point_idx))
-                pickle.dump(X, open(save_path+"x_{}.p".format(save_point_idx), "wb"))
-                pickle.dump(Y, open(save_path+"y_{}.p".format(save_point_idx), "wb"))
+                pickle.dump(X, open(data_path+"x_{}.p".format(save_point_idx), "wb"))
+                pickle.dump(Y, open(data_path+"y_{}.p".format(save_point_idx), "wb"))
                 X, Y=[],[]
                 save_point_idx+=1
 
@@ -241,61 +237,81 @@ def CNN_feature_extraction(X, resnet, device):
         del x_loader
 
     return torch.cat(output).cpu().reshape(-1,3,1000)
-           
 
-def generate_vocab(path):
-    predicate_list = []
-    batch_number = 37
-    for itr in range(batch_number):
-        Y_flat = pickle.load(open(path+"pixie_data/y_{}.p".format(itr), "rb"))
-        predicate_list.append(np.array(Y_flat).reshape(-1))
-        
-    predicate_list, predicate_count = np.unique(np.concatenate(predicate_list),return_counts=True)
-    predicates_table = {w:i for i,w in enumerate(predicate_list)}
-    
-    return predicate_list, predicates_table
 
-def features_PCA(work_path,pixie_dim_new):
+def features_PCA(data_path, pca_path,pixie_dim_new):
     pixie_dim = 1000
-    cov_global = torch.zeros(pixie_dim,pixie_dim)
+    # cov_global = torch.zeros(pixie_dim,pixie_dim)
     data_size = 0
     batch_number = 10
-
+    x_batch, y_batch = [], []
     for itr in tqdm(range(batch_number)):
-        x_hidden = pickle.load(open(work_path+"pixie_data/x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
-        diff = x_hidden - torch.mean(x_hidden,0)
-        cov_batch = torch.matmul(diff.T,diff)/x_hidden.shape[0]
-        cov_global = cov_global*(data_size/(data_size+x_hidden.shape[0])) \
-                    + cov_batch*(x_hidden.shape[0]/(data_size+x_hidden.shape[0]))
-        
-        data_size += x_hidden.shape[0]
-        
-    # PCA transform matrix
-    eigen_vals, eigen_vecs = np.linalg.eig(cov_global)
-    eigen_vecs_sorted = np.array([x for _, x in sorted(zip(eigen_vals, eigen_vecs), key=lambda pair: pair[0], reverse=True)])
-    eigen_vals_sorted = sorted(eigen_vals, reverse=True)
-    x_eigenval = eigen_vals_sorted[:pixie_dim_new]
-    PCA_transform_matrix = eigen_vecs_sorted[:,:pixie_dim_new]
-
-    # PCA transforming 
-    x_batch = []
-    y_batch = []
-    for itr in tqdm(range(batch_number)):
-        x_hidden = pickle.load(open(work_path+"pixie_data/x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
-        Y_flat = pickle.load(open(work_path+"pixie_data/y_{}.p".format(itr), "rb"))
-        x_pca = x_hidden.reshape(-1,pixie_dim).numpy().dot(PCA_transform_matrix)
-        x = x_pca/(0.4*np.sqrt(x_eigenval[:pixie_dim_new]))
-        x_batch.append(torch.Tensor(x))
+        x_hidden = pickle.load(open(data_path+"x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
+        Y_flat = pickle.load(open(data_path+"y_{}.p".format(itr), "rb"))
+        x_batch.append(x_hidden)
         y_batch.append(Y_flat)
 
     x_batch = torch.cat(x_batch)
     y_batch = np.concatenate(y_batch)
-    
-    pickle.dump(x_batch.reshape(-1,3,pixie_dim_new), open(work_path+"pixie_data/data_pca/x_preprocessed.p", "wb"))
-    pickle.dump(y_batch, open(work_path+"pixie_data/data_pca/y_preprocessed.p", "wb"))
+
+    # x_batch = (x_batch-torch.mean(x_batch,0))/torch.std(x_batch,0)
+    cov = np.cov(x_batch.T)
+
+    eigen_values, eigen_vectors = np.linalg.eig(cov)
+    projection_matrix = (eigen_vectors.T[:][:pixie_dim_new]).T
+    X_pca = x_batch.numpy().dot(projection_matrix) /pow(eigen_values[:pixie_dim_new],1/2)*1.13
+
+    pickle.dump(torch.Tensor(X_pca).reshape(-1,3,pixie_dim_new), open(pca_path+"x_preprocessed.p", "wb"))
+    pickle.dump(y_batch, open(pca_path+"y_preprocessed.p", "wb"))
+
+# def features_PCA(data_path, pca_path,pixie_dim_new):
+#     pixie_dim = 1000
+#     cov_global = torch.zeros(pixie_dim,pixie_dim)
+#     data_size = 0
+#     batch_number = 10
+
+#     for itr in tqdm(range(batch_number)):
+#         x_hidden = pickle.load(open(data_path+"x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
+#         diff = x_hidden - torch.mean(x_hidden,0)
+#         cov_batch = torch.matmul(diff.T,diff)/x_hidden.shape[0]
+#         cov_global = cov_global*(data_size/(data_size+x_hidden.shape[0])) \
+#                     + cov_batch*(x_hidden.shape[0]/(data_size+x_hidden.shape[0]))
+        
+#         data_size += x_hidden.shape[0]
+        
+#     # PCA transform matrix
+#     eigen_vals, eigen_vecs = np.linalg.eig(cov_global)
+#     eigen_vecs_sorted = eigen_vecs[:,eigen_vals.argsort()[::-1]]
+#     eigen_vals_sorted = sorted(eigen_vals, reverse=True)
+#     x_eigenval = np.array(eigen_vals_sorted[:pixie_dim_new])
+#     PCA_transform_matrix = eigen_vecs_sorted[:,:pixie_dim_new]
+#     # PCA transforming 
+#     x_batch = []
+#     y_batch = []
+#     for itr in tqdm(range(batch_number)):
+#         x_hidden = pickle.load(open(data_path+"x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
+#         Y_flat = pickle.load(open(data_path+"y_{}.p".format(itr), "rb"))
+#         x_pca = x_hidden.numpy().dot(PCA_transform_matrix)
+#         # first rescaling to bring the numbers down
+#         # det -> 1, coefficient is *1.29"
+#         x_pca = x_pca /pow(x_eigenval,1) *10
+#         x_batch.append(torch.Tensor(x_pca))
+#         y_batch.append(Y_flat)
+
+#     x_batch = torch.cat(x_batch)
+#     y_batch = np.concatenate(y_batch)
+#     # further rescaling the data so that the covariance will have diagonal entries close to 1 and therefore det close to 1
+#     # need to recompute the eigenvalues
+#     # cov = get_cov(x_batch)
+#     # w, _ = np.linalg.eig(cov)
+#     # x_batch = x_batch * np.sqrt(w)/np.product(np.array([pow(e,1/pixie_dim) for e in w]))
+
+#     pickle.dump(x_batch.reshape(-1,3,pixie_dim_new), open(pca_path+"x_preprocessed.p", "wb"))
+#     pickle.dump(y_batch, open(pca_path+"y_preprocessed.p", "wb"))
+
             
 
-def plot_example(idx, re_idx,work_path, relations):
+def plot_example(idx, re_idx, work_path, relations):
     img_id = relations.iloc[idx]['image_id']
     re = relations.iloc[idx]['relationships'][re_idx]
     path = work_path+'/visualgeno/VG_100K/{}.jpg'.format(img_id)
@@ -323,19 +339,27 @@ def plot_example(idx, re_idx,work_path, relations):
     # plot_example(4,8, relations)
 
 if __name__ == '__main__':
-    from PIL import Image
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pixie_dim', type=int, default=100, help='dimension of pixie')
+    parser.add_argument('--data_path', type=str, default='pixie_data/', help='path to save data')
+    parser.add_argument('--pca_path', type=str, default='data_pca/', help='path to save PCA data')
+    parser.add_argument('--min_freq', type=int, default=30, help='Filtering out low frequent words')
+    args = parser.parse_args()
+
     print('Processing the Visual Genome data')
     VG_path = '/local/scratch/yl535/visualgeno/'
     obj_path = VG_path+'objects.json.zip'
     rel_path = VG_path+'relationships.json.zip'
-    save_path = '/local/scratch/yl535/pixie_data/'
-    work_path = '/local/scratch/yl535/'
+    data_path = '/local/scratch/yl535/'+args.data_path
+    pca_path = data_path + args.pca_path
+    if not os.path.isdir(data_path): os.mkdir(data_path)
+    if not os.path.isdir(pca_path): os.mkdir(pca_path)
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
 
-    # filtered_objects_counts, all_objects = generate_objects_vocab(obj_path)
-    # rels_checklist, _ = generate_rels_checklist(rel_path, list(filtered_objects_counts.keys()), all_objects)
-    # filter_relations(rel_path, save_path, device, all_objects, rels_checklist)
-
-    features_PCA(work_path,pixie_dim_new=20)
+    # filtered_objects_counts, all_objects = generate_objects_vocab(obj_path, args.min_freq)
+    # rels_checklist, _ = generate_rels_checklist(rel_path, list(filtered_objects_counts.keys()), all_objects, args.min_freq)
+    # filter_relations(rel_path, data_path, device, all_objects, rels_checklist)
+    features_PCA(data_path, pca_path, pixie_dim_new=args.pixie_dim)
 

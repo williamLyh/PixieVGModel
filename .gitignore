@@ -1,4 +1,16 @@
-world_parameters.p
-Lexical_parameters.p
-Lexical_parameters_2.p
+
 runs/
+# all pickle files and parameters files
+*.p
+parameters/
+
+# all images
+*.pdf
+
+# vscode cache files
+__pycache__
+
+# all jupyter notebook
+*.ipynb
+
+

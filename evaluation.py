@@ -1,3 +1,5 @@
+import argparse
+from numpy.lib.function_base import cov
 from torchvision import models
 import torchvision
 import torch
@@ -8,7 +10,7 @@ from torchtext.data.utils import get_tokenizer
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
-
+from sklearn.metrics import average_precision_score
 import pickle
 import gc
 from tqdm import tqdm
@@ -39,33 +41,63 @@ def load_trained_model(model_path, device):
     V = V.to(device)
     return W_mu, W_cov, V
 
-def load_relpron(data_path):
-    pixie_preds, test_pred, POS, vocab = [],[],[],[]
+def load_relpron(data_path, vocab_path):
+    # pixie_preds, test_pred, head_noun_POS, vocab = [],[],[],[]
+    property_list, term_list = [], []
+    term_table = {}
     line_num = 0
+    predicate_list, predicates_table = generate_vocab(vocab_path)
+    instance_cnt = 0
     with open(data_path+'RELPRON/relpron.all') as f:
         for line in f:
             line_num += 1
             words = line.split(' ')
-            pred = words[1].split('_')[0]
+            term = words[1].split('_')[0]
             if words[0] == 'OBJ':
                 subj = words[4].split('_')[0]
                 verb = words[5].split('_')[0]
                 obj = words[2].split('_')[0]
+                head_noun_pos = 2
             else:
                 subj = words[2].split('_')[0]
                 verb = words[4].split('_')[0]
                 obj = words[5].split('_')[0]
+                head_noun_pos = 0
             
             # filtering word not in predicate list
-            pixie_preds.append([subj,verb,obj])
-            test_pred.append(pred)
-            POS.append(2 if words[0]=='OBJ' else 0)
-            vocab += [subj,verb,obj,pred]
+            if (term in predicate_list) and (subj in predicate_list) and (verb in predicate_list) and (obj in predicate_list):
+                property_list.append([predicates_table[subj],
+                                        predicates_table[verb],
+                                        predicates_table[obj], head_noun_pos])
+                if term in term_table:
+                    term_table[predicates_table[term]].append([predicates_table[subj],
+                                                                predicates_table[verb],
+                                                                predicates_table[obj], head_noun_pos])
+                else:
+                    term_table[predicates_table[term]] =[[predicates_table[subj],
+                                                            predicates_table[verb],
+                                                            predicates_table[obj], head_noun_pos]]
+                    term_list.append(predicates_table[term])
+                instance_cnt+=1
 
-    return pixie_preds, test_pred, POS, np.unique(vocab)
+            # if (term in predicate_list) and (subj in predicate_list) and (verb in predicate_list) and (obj in predicate_list):
+            #     property_list.append([subj,verb,obj, head_noun_pos])
+            #     if term in term_table:
+            #         term_table[term].append([subj,verb,obj, head_noun_pos])
+            #     else:
+            #         term_table[term] =[[subj,verb,obj, head_noun_pos]]
+            #         term_list.append(term)
+            #     instance_cnt+=1
+    print(instance_cnt)
+    # pickle.dump(term_table, open("filtered_relpron.p", "wb"))
+    # print(term_table)
+    return term_table, property_list, term_list
+
 
 def load_men(data_path):
+    # path_men = data_path+'MEN/MEN_dataset_lemma_form.test'
     path_men = data_path+'MEN/MEN_dataset_lemma_form_full'
+
     pixie_pred,test_pred,scores, POS = [], [], [],[]
     with open(path_men) as f:
         for line in f:
@@ -135,97 +167,297 @@ def generate_vocab(data_path):
     predicates_table = {w:i for i,w in enumerate(predicate_list)}
     return predicate_list, predicates_table
 
-def filter_data(pixie_pred, test_pred, scores, POS=None):
+# def generate_EVA_vocab(path):
+#     data = pickle.load(open(path, "rb"))
+
+
+
+def filter_evaluation_data(dataset, vocab_path, pixie_pred, test_pred, scores, POS=None, EVA_vocab_path=None):
     def word2int(words,vocab_tab):
         return [vocab_tab[word] for word in words]
 
-    predicate_list, predicates_table = generate_vocab(data_path+'pixie_data/data_pca/')
-    flag = []
-    for pixie, pred in zip(pixie_pred, test_pred):
-        if (pixie in predicate_list) and (pred in predicate_list):
-            flag.append(True)
-        else:
-            flag.append(False)
-    flag = np.array(flag)
+    predicate_list, predicates_table = generate_vocab(vocab_path)
+    if EVA_vocab_path != None:
+        filtered_EVA_data = pickle.load(open(EVA_vocab_path, "rb"))
+        flag = []
+        flag_OOV=[]
+        cnt_OOV=0
+        for pixie, pred in zip(pixie_pred, test_pred):
+            if (pixie in predicate_list) and (pred in predicate_list) and ((pixie+'.n',pred+'.n') in filtered_EVA_data):
+                flag.append(True)
+            else:
+                flag.append(False)
 
-    covered_pixies = word2int(np.array(pixie_pred)[flag], predicates_table)
+            if ((pixie+'.n',pred+'.n') in filtered_EVA_data) and not ((pixie in predicate_list) and (pred in predicate_list)):
+                flag_OOV.append(True)
+                cnt_OOV+=1
+            else:
+                flag_OOV.append(False)
+        print(cnt_OOV)
+    else:
+        flag = []
+        for pixie,pred in zip(pixie_pred, test_pred):
+            if dataset == 'GS2011':
+                words = list(pixie)+[pred]
+            else:
+                words = [pixie, pred]
+            # print(sum([w in predicate_list for w in words]))
+            if sum([w in predicate_list for w in words])==len(words):
+                flag.append(True)
+            else:
+                flag.append(False)
+
+    # print(np.array(pixie_pred)[flag].shape)
+    if dataset == 'GS2011':
+        covered_pixies = [word2int(row,predicates_table) for row in np.array(pixie_pred)[flag]]
+        # pickle.dump((np.array(pixie_pred)[flag],np.array(test_pred)[flag],np.array(POS)[flag],np.array(scores)[flag])  , open("filtered_gs11.p", "wb"))
+        # print((np.array(pixie_pred)[flag],np.array(test_pred)[flag],np.array(POS)[flag],np.array(scores)[flag]))
+        # print(np.array(pixie_pred)[flag].shape)
+        # assert False
+    else:
+        covered_pixies = word2int(np.array(pixie_pred)[flag], predicates_table)
+    print(covered_pixies)
     covered_preds = word2int(np.array(test_pred)[flag], predicates_table)
     covered_POS = np.array(POS)[flag] if POS else None
     covered_scores = np.array(scores)[flag]
     print("vocab coverage {} our of {}".format(len(covered_pixies), len(pixie_pred)))
+    oov_scores = np.array(scores)[flag_OOV] if EVA_vocab_path != None else None
 
-    return covered_pixies, covered_preds, covered_scores, covered_POS
+    return covered_pixies, covered_preds, covered_scores, covered_POS, oov_scores
 
 
-def evaluate_men(data_path, device):
+
+def evaluate_dataset(dataset , data_path, vocab_path, device, pixie_dim, model_path, EVA_vocab=False):
     def renormalize(pred, score):
         range1 = max(pred)-min(pred)
         range2 = max(score)- min(score)
         renormalized_pred = [round((val-min(pred))*range2/range1) + min(score) for val in pred]
         return renormalized_pred
+        
+    EVA_vocab_path = None   
+    if dataset=='MEN':
+        pixie_pred, test_pred, POS, scores = load_men(data_path)
+        EVA_vocab_path = 'filtered_men.p' if EVA_vocab else None
+    elif dataset=='Simlek':
+        pixie_pred, test_pred, POS, scores = load_simlek999(data_path)
+        EVA_vocab_path = 'filtered_simlek.p' if EVA_vocab else None
+    elif dataset=='RELPRON':
+        term_table, property_list, term_list = load_relpron(data_path, vocab_path)
+        # print(term_table)
+        # print(len(property_list))
+        # EVA_vocab_path = 'filtered_simlek.p' if EVA_vocab else None
+    elif dataset=='GS2011':
+        pixie_pred, test_pred, POS, scores  = load_gs11(data_path)
+    else:
+        print('wrong dataset')
+    # assert False
+    if dataset!='RELPRON':
+        # relpron use different evaluation metrics
+        covered_pixies, covered_preds, covered_scores, covered_POS, oov_scores = filter_evaluation_data(dataset, vocab_path, pixie_pred,test_pred,scores, POS, EVA_vocab_path)
+        pred_rank, pred_truths = perform_variational_inference(device, covered_pixies, covered_preds, covered_scores, covered_POS,pixie_dim,model_path)
+        if not EVA_vocab:
+            renormalized_pred_rank = renormalize(pred_rank, covered_scores)
+            correlation = stats.spearmanr(renormalized_pred_rank, covered_scores).correlation
+            print("Spearman correlation truth: {}".format(stats.spearmanr(pred_truths, covered_scores).correlation))
+            print("Spearman correlation score: {}".format(stats.spearmanr(pred_rank, covered_scores).correlation))
+            print("Spearman renormalized correlation score: {}".format(correlation))
+        else:
+            oov_length = len(oov_scores)
+            pred_rank += [np.median(pred_rank)]*oov_length
+            pred_truths += [0.5]*oov_length
+            covered_scores = np.concatenate([covered_scores,oov_scores])
+            print(pred_rank,covered_scores)
+            renormalized_pred_rank = renormalize(pred_rank, covered_scores)
+            correlation = stats.spearmanr(renormalized_pred_rank, covered_scores).correlation
+            pickle.dump((pred_rank,covered_scores), open('simlex_result.p','wb'))
 
-    pixie_pred, test_pred, POS, scores = load_men(data_path)
-    covered_pixies, covered_preds, covered_scores, covered_POS = filter_data(pixie_pred,test_pred,scores, POS)
-    pred_rank = perform_variational_inference(device, covered_pixies, covered_preds, covered_scores, covered_POS)
-    renormalized_pred_rank = renormalize(pred_rank, covered_POS)
-    correlation = stats.spearmanr(renormalized_pred_rank, covered_POS).correlation
-    print("Spearman correlation score: {}".format(correlation))
+            print("Spearman correlation truth: {}".format(stats.spearmanr(pred_truths, covered_scores).correlation))
+            print("Spearman correlation score: {}".format(stats.spearmanr(pred_rank, covered_scores).correlation))
+            print("Spearman renormalized correlation score: {}".format(correlation))
+    else:
+        # relpron use Mean Average Precision
+        W_mu, W_cov, V = load_trained_model(model_path, device)
+
+        buf = {}
+        buf2 = {}
+        for idx in tqdm(range(len(property_list))):
+            property = property_list[idx]
+            p1 = property[:3]
+            pos = property[3]
+            all_truths, loss_history = _single_variational_inference(p1,pos,W_mu, W_cov, V, device, pixie_dim)
+            print(np.where(all_truths.numpy().argsort()[::-1]==p1[pos])[0].item())
+
+            p_buf = {}
+            for term in term_list:
+                # rank = np.where(all_truths.numpy().argsort()[::-1]==term)[0].item()
+                rank = _get_ranking(all_truths.numpy(),term_list,term)
+                p_buf[term] = rank
+                if term in buf2:
+                    buf2[term][tuple(property_list[idx])] = rank
+                else: 
+                    buf2[term] = {tuple(property_list[idx]): rank}
+            print(p_buf)
+            buf[tuple(property_list[idx])]= p_buf
+
+        APs = []
+        for term, p_list in buf2.items():
+            labels = [0]*len(property_list)
+            pred_ranks = []
+            for idx, (property, rank) in enumerate(p_list.items()):
+                pred_ranks.append(rank)
+                if list(property) in term_table[term]:
+                    labels[idx] = 1
+            APs.append(average_precision_score(labels, np.nan_to_num(pred_ranks,nan=max(pred_ranks))))
+            print(APs)
+        print("Mean Average Precision score: {}".format(np.mean(APs)))
+
+
+
+        # assert False
+
+        # MAP = 0
+        # APs = []
+        # for term in tqdm(term_list):
+        #     labels = [0]*len(property_list)
+        #     pred_ranks = []
+        #     for idx in range(len(property_list)):
+        #         property = property_list[idx]
+        #         p1 = property[:3]
+        #         p2 = term
+        #         pos = property[3]
+        #         # print(p1,p2,pos)
+        #         # assert False
+        #         all_truths, loss_history = _single_variational_inference(p1,pos,W_mu, W_cov, V, device, pixie_dim)
+        #         rank = np.where(all_truths.numpy().argsort()[::-1]==p1[pos])[0].item()
+        #         pred_ranks.append(all_truths[p2])
+        #         if property in term_table[term]:
+        #             labels[idx]=1
+        #             # pass  # check format of property
+
+        #     APs.append(average_precision_score(labels, pred_ranks))
+        # print("Mean Average Precision score: {}".format(np.mean(APs)))
+
     
 
-def perform_variational_inference(device, pixies, preds, scores, POS):
+def perform_variational_inference(device, pixies, preds, scores, POS, pixie_dim, model_path):
     print("Performing Variational Inference")
-    pixie_dim, lr, dr, epoch_num = 20, 0.1, 0.005, 600
-    model_path = ''
     W_mu, W_cov, V = load_trained_model(model_path, device)
     loss_history_list = []
     pred_rank = []
+    pred_truths = []
     for p1,p2,pos in tqdm(zip(pixies, preds, POS),total=len(pixies)):
+        # print(predicate_list[p1],predicate_list[p2],pos)
+        cnt = 0
+        rank = 101
+        while cnt<3 and rank >5:
+            cnt+=1
+            all_truths, loss_history = _single_variational_inference(p1,pos,W_mu, W_cov, V, device, pixie_dim)
+            # all_truths = all_truths.numpy()
+            if isinstance(p1,list):
+                rank = np.where(all_truths.numpy().argsort()[::-1]==p1[pos])[0].item()
+            else:
+                rank = np.where(all_truths.numpy().argsort()[::-1]==p1)[0].item()
+        # evaluation
+        loss_history_list.append(loss_history)
+        truth_rank = _get_ranking(all_truths.numpy(), preds, p2)
+        # print('length of pred:',all_truths[-50:])
+        print(truth_rank)
+        pred_rank.append(truth_rank)
+        pred_truths.append(all_truths[p2])
+    return pred_rank, pred_truths
+
+def _get_ranking(all_truths, pred_list, pred):
+    sorted_truth = np.sort(all_truths)
+    truth_index = np.argsort(all_truths)
+    cnt=0
+    for t, i in zip(sorted_truth,truth_index):
+        if i in pred_list:
+            cnt+=1
+        if i ==pred:
+            return cnt
+
+def _single_variational_inference(pred,pos,W_mu, W_cov, V, device,pixie_dim):
+    lr, epoch_num =  0.03,  1000
+
+    if not isinstance(pred,list):
         model = VariationalInferenceModel(pixie_dim)   # here depends on the dataset
         model.to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay = dr)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.6)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-7, max_lr=lr,step_size_up=100,mode="triangular2",cycle_momentum=False)
         loss_history = []
         for epoch in range(epoch_num):
-            if np.mod(30,epoch)==0 & epoch!=0:
-                lr = lr *0.4
-                optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay = dr)
-
             q_mu, q_cov = model()
             optimizer.zero_grad()
             W_mu_pos = W_mu[pixie_dim*pos:pixie_dim*(pos+1)]
             W_cov_pos = W_cov[pixie_dim*pos:pixie_dim*(pos+1),pixie_dim*pos:pixie_dim*(pos+1)]
-                
             Dqp = -torch.log(torch.det(q_cov))  \
                 + torch.sum(torch.mul((q_mu-W_mu_pos).T, torch.matmul(torch.inverse(W_cov_pos),(q_mu-W_mu_pos).T))) \
                 + torch.sum(torch.diagonal(torch.matmul(torch.inverse(W_cov_pos), q_cov),dim1=-1, dim2=-2))
             
-            pred_loss = approx_E_log_sig(q_mu, q_cov, torch.unsqueeze(V[p1],0)) \
+            pred_loss = approx_E_log_sig(q_mu, q_cov, torch.unsqueeze(V[pred],0)) \
                         - torch.log(torch.sum(approx_E_sig(q_mu, q_cov, V)))
         
-            loss = 0.01*Dqp - pred_loss
+            loss = 0.05*Dqp - pred_loss
             loss.backward()
             optimizer.step()  
+            scheduler.step()
             loss_history.append(loss.item())
         print(Dqp.item(), pred_loss.item())
-
-        loss_history_list.append(loss_history)
-        # evaluation
-        truth = approx_E_sig(q_mu, q_cov, torch.unsqueeze(V[p2],0)).item()
         all_truths = approx_E_sig(q_mu, q_cov, V).cpu().detach()
-        sorted_truth,truth_index = torch.sort(all_truths, descending=True)
-        truth_rank = torch.nonzero(truth_index == p2).item()  # give rank index
+        return all_truths, loss_history
+    else:
+        model = VariationalInferenceModel(pixie_dim*3)   # here depends on the dataset
+        model.to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.05)
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.6)
+        scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-5, max_lr=lr,step_size_up=300,mode="triangular2",cycle_momentum=False)
+        loss_history = []
+        for epoch in range(epoch_num):
+            q_mu, q_cov = model()
+            optimizer.zero_grad()
+            # W_mu_pos = W_mu[pixie_dim*pos:pixie_dim*(pos+1)]
+            # W_cov_pos = W_cov[pixie_dim*pos:pixie_dim*(pos+1),pixie_dim*pos:pixie_dim*(pos+1)]
+            Dqp = -torch.log(torch.det(q_cov)) \
+                + torch.sum(torch.mul((q_mu-W_mu).T, torch.matmul(torch.inverse(W_cov),(q_mu-W_mu).T))) \
+                + torch.sum(torch.diagonal(torch.matmul(torch.inverse(W_cov), q_cov),dim1=-1, dim2=-2))
+            pred_loss = 0
+            for i in range(len(pred)):
+                q_mu_pos = q_mu[pixie_dim*i:pixie_dim*(i+1)]
+                q_cov_pos = q_cov[pixie_dim*i:pixie_dim*(i+1),pixie_dim*i:pixie_dim*(i+1)]
+                pred_loss += approx_E_log_sig(q_mu_pos, q_cov_pos, torch.unsqueeze(V[pred[i]],0)) \
+                            - torch.log(torch.sum(approx_E_sig(q_mu_pos, q_cov_pos, V)))
         
-        pred_rank.append(truth_rank)
-        # print(truth, truth_rank, p1, p2)
-
-    return pred_rank
-
-    
+            loss = 0.15*Dqp - pred_loss
+            loss.backward()
+            optimizer.step()  
+            scheduler.step()
+            loss_history.append(loss.item())
+            # if epoch%500 == 0:
+            #     print(Dqp.item(), pred_loss.item())
+            #     print(torch.sum(torch.mul((q_mu-W_mu).T, torch.matmul(torch.inverse(W_cov),(q_mu-W_mu).T))).item())
+        print(Dqp.item(), pred_loss.item())
+        q_mu_pos = q_mu[pixie_dim*pos:pixie_dim*(pos+1)]
+        q_cov_pos = q_cov[pixie_dim*pos:pixie_dim*(pos+1),pixie_dim*pos:pixie_dim*(pos+1)]
+        all_truths = approx_E_sig(q_mu_pos, q_cov_pos, V).cpu().detach()
+        return all_truths, loss_history
 
 if __name__ == '__main__':
-    data_path = "/local/scratch/yl535/"
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pixie_dim', type=int, default=100, help='dimension of pixie')
+    parser.add_argument('--dataset', type=str, default='MEN', help='evaluation dataset')
+    parser.add_argument('--data_path', type=str, default='pixie_data/', help='path to save data')
+    parser.add_argument('--pca_path', type=str, default='data_pca/', help='path to save PCA data')
+    parser.add_argument('--parameter_path', type=str, default='parameters/', help='path to save parameters')
+    parser.add_argument('--use_EVA_vocab', type=bool , default=False, help='if using EVA filtered vocab')
+
+    args = parser.parse_args()
+
+    work_path = "/local/scratch/yl535/"
+    vocab_path = '/local/scratch/yl535/'+args.data_path+args.pca_path
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     # X_eval, Y_eval, POS, scores = load_men(data_path)
-    # X_eval, Y_eval, scores = load_gs11(data_path)
+    # X_eval, Y_eval, scores = load_gs11(data_path)t
 
     # print(X_eval[0])
     # print(Y_eval[0])
@@ -234,5 +466,5 @@ if __name__ == '__main__':
 
     # covered_pixies, covered_preds, covered_POS, covered_scores = evaluate_men(data_path)
     # print(covered_pixies, covered_preds,covered_scores)
-    predicate_list, predicates_table = generate_vocab(data_path+'pixie_data/data_pca/')   
-    evaluate_men(data_path, device)
+    # predicate_list, predicates_table = generate_vocab(data_path+'pixie_data/data_pca_2/')   
+    evaluate_dataset(args.dataset, work_path, vocab_path, device, args.pixie_dim, args.parameter_path, args.use_EVA_vocab)
