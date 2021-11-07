@@ -38,17 +38,17 @@ python3 pixie_model.py --pixie_dim=100 --data_path=pixie_data_2/ --pca_path=data
 
 ### Evalute the PixieModel
 
-`--pixie_dim`
+`--pixie_dim`: Dimension of the pixie, default is 100.
 
-`--dataset`
+`--dataset`: This could be one of the 'MEN', 'Simlek', 'RELPRON' and 'GS2011'.
 
 `--data_path`
 
 `--pca_path`
 
-`--parameter_path`
+`--parameter_path`: The path of the trained parameters 'world_parameters.p' and 'Lexical_parameters.p'.
 
-`--use_EVA_vocab`
+`--use_EVA_vocab`: Boolean value to set if only use the vocab covered by the EVA work.
 
 ```
 python3 evaluation.py --dataset=Simlek --pixie_dim=100 --data_path=pixie_data_2/ --pca_path=data_pca_2/
