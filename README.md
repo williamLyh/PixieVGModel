@@ -14,8 +14,14 @@ SimLek-999: https://fh295.github.io/simlex.html
 `--pca-path`
 
 ```
-python3 preprocessing.py --pixie_dim=100 --data_path=pixie_data_2/ --pca_path=data_pca_2/
-```
+python3 preprocessing.py \
+    --VG_path=/the_path_of_your_VG_zip_data/ \
+    --pixie_dim=100 \
+    --data_path=/the_path_of_your_filtered_transformed_data/ \
+    --pca_path=/the_path_of_your_pca_transformed_data/ \
+    --pca_only=True \
+    --min_freq=100
+ ```
 
 ### Train the PixieModel
 `--pixie_dim`
@@ -33,7 +39,13 @@ python3 preprocessing.py --pixie_dim=100 --data_path=pixie_data_2/ --pca_path=da
 `epoch_num`
 
 ```
-python3 pixie_model.py --pixie_dim=100 --data_path=pixie_data_2/ --pca_path=data_pca_2/ --parameter_path=''
+python3 pixie_model.py \
+    --pixie_dim=100 \
+    --pca_path=/the_path_of_your_pca_transformed_data/ \
+    --parameter_path='parameters/' \
+    --lr=0.01 \
+    --dr=5e-8 \
+    --epoch_num=20
 ```
 
 ### Evalute the PixieModel
