@@ -1,5 +1,6 @@
 import argparse
 from numpy.lib.function_base import cov
+from torch.nn import parameter
 from torchvision import models
 import torchvision
 import torch
@@ -41,16 +42,148 @@ def load_trained_model(model_path, device):
     V = V.to(device)
     return W_mu, W_cov, V
 
+def load_men(data_path, vocab_path):
+    path_men = data_path+'MEN/MEN_dataset_lemma_form_full'
+
+    data = pd.DataFrame()
+    predicate_list, predicates_table = pickle.load(open(vocab_path+'vocabulary.p','rb'))
+    EVA_vocab_path = 'filtered_men.p'
+    filtered_EVA_data = pickle.load(open(EVA_vocab_path, "rb"))
+    filtered_EVA_data = [(pair[0].split('.')[0], pair[1].split('.')[0]) for pair in filtered_EVA_data]
+    
+    pixie_pred, test_pred, scores, pos = [], [], [],[]
+    oov_flag, eva_flag = [], []
+
+    with open(path_men) as f:
+        for line in f:
+            word1 = line.split(' ')[0].split('-')[0]
+            word2 = line.split(' ')[1].split('-')[0]
+            pixie_pred.append(word1)
+            test_pred.append(word2)
+            scores.append(float(line.split(' ')[2]))
+
+            pos_name = line.split(' ')[0].split('-')[1]
+            if pos_name=='n':
+                pos.append(0)
+            elif pos_name=='v':
+                pos.append(1)
+            elif pos_name=='j':
+                pos.append(2)
+            else:
+                print("false POS in MEN")
+                pos.append(3)
+
+            # flags showing if the datapoint is oov
+            if (word1 in predicate_list) and (word2 in predicate_list):
+                oov_flag.append(0)
+            else:
+                oov_flag.append(1)
+            
+            # flags showing if the datapoint is EVA-oov
+            if (word1, word2) in filtered_EVA_data:
+                eva_flag.append(0)
+            else:
+                eva_flag.append(1)
+
+    data['word1'], data['word2'], data['pos'], data['reference_scores'] = pixie_pred, test_pred, pos, scores
+    data['oov'], data['eva_oov'] = oov_flag, eva_flag
+    return data
+
+
+def load_simlek999(data_path, vocab_path):
+    path_simlex = data_path+'SimLex-999/SimLex-999.txt'
+    simlek_df = pd.read_csv(path_simlex, delimiter = "\t")
+    predicate_list, predicates_table = pickle.load(open(vocab_path+'vocabulary.p','rb'))
+
+    EVA_vocab_path = 'filtered_simlek.p'
+    filtered_EVA_data = pickle.load(open(EVA_vocab_path, "rb"))
+    filtered_EVA_data = [(pair[0].split('.')[0], pair[1].split('.')[0]) for pair in filtered_EVA_data]
+
+    oov_flag, eva_flag, pos = [], [], []
+    for index, row in simlek_df.iterrows():
+        if (row['word1'] in predicate_list) and (row['word2'] in predicate_list):
+            oov_flag.append(0)
+        else:
+            oov_flag.append(1)
+
+        if (row['word1'], row['word2']) in filtered_EVA_data:
+            eva_flag.append(0)
+        else:
+            eva_flag.append(1)
+
+        if row['POS']=='N':
+            pos.append(0)
+        elif row['POS']=='V':
+            pos.append(1)
+        elif row['POS']=='A':
+            pos.append(2)
+        else:
+            print("False POS for Simlek999 ")
+            pos.append(3)
+        
+    simlek_df['pos'] = pos
+    simlek_df['oov'] = oov_flag
+    simlek_df['eva_oov'] = eva_flag
+    simlek_df['reference_scores'] = simlek_df['SimLex999']
+
+    return simlek_df[['word1', 'word2', 'pos', 'reference_scores', 'oov', 'eva_oov']]
+
+
+def load_gs11(data_path, vocab_path):
+    path_gs11 = data_path+'GS2011data.txt'
+    gs11_df = pd.read_csv(path_gs11, delimiter = " ")
+    predicate_list, predicates_table = pickle.load(open(vocab_path+'vocabulary.p','rb'))
+
+    EVA_vocab_path = 'filtered_gs11.p'
+    filtered_EVA_data = pickle.load(open(EVA_vocab_path, "rb"))
+    # filtered_EVA_data = [(row[0], row[1]) for row in filtered_EVA_data]
+    filtered_EVA = []
+    for i in range(len(filtered_EVA_data[0])):
+        filtered_EVA.append((list(filtered_EVA_data[0][i]),filtered_EVA_data[1][i]))
+
+    oov_flag, eva_flag = [], []
+    for index, row in gs11_df.iterrows():
+        if sum([word in predicate_list for word in row[['subject','verb','object','landmark']]]) == 4:
+            oov_flag.append(0)
+        else: 
+            oov_flag.append(1)
+
+        if (list(row[['subject','verb','object']]), row['landmark']) in filtered_EVA:
+            eva_flag.append(0)
+        else:
+            eva_flag.append(1)
+
+    gs11_df['word1'] = gs11_df[['subject','verb','object']].values.tolist()
+    gs11_df['word2'] = gs11_df['landmark']
+    gs11_df['pos'] = 1
+    gs11_df['oov'] = oov_flag
+    gs11_df['eva_oov'] = eva_flag
+    gs11_df['reference_scores'] = gs11_df['input']
+
+    return gs11_df[['word1', 'word2', 'pos', 'reference_scores', 'oov', 'eva_oov']]
+
+
 def load_relpron(data_path, vocab_path):
+
+    data = pd.DataFrame()
+    predicate_list, predicates_table = pickle.load(open(vocab_path+'vocabulary.p','rb'))
+
+    # EVA_vocab_path = 'filtered_relpron.p'
+    # filtered_EVA_data = pickle.load(open(EVA_vocab_path, "rb"))
+    # filtered_EVA_data = [(row[0], row[1]) for row in filtered_EVA_data]
+
     # pixie_preds, test_pred, head_noun_POS, vocab = [],[],[],[]
-    property_list, term_list = [], []
-    term_table = {}
-    line_num = 0
-    predicate_list, predicates_table = generate_vocab(vocab_path)
-    instance_cnt = 0
+    # property_list, term_list = [], []
+    # term_table = {}
+    
+    terms, triples, pos, oov_flag, ranks = [], [], [], [], [] # The 'rank' is the ranking within the term. 
+    term_count = {}
+    # line_num = 0
+    # predicate_list, predicates_table = generate_vocab(vocab_path)
+    # instance_cnt = 0
     with open(data_path+'RELPRON/relpron.all') as f:
         for line in f:
-            line_num += 1
+            # line_num += 1
             words = line.split(' ')
             term = words[1].split('_')[0]
             if words[0] == 'OBJ':
@@ -64,91 +197,45 @@ def load_relpron(data_path, vocab_path):
                 obj = words[5].split('_')[0]
                 head_noun_pos = 0
             
-            # filtering word not in predicate list
+            terms.append(term)
+            triples.append((subj, verb, obj))
+            pos.append(head_noun_pos)
             if (term in predicate_list) and (subj in predicate_list) and (verb in predicate_list) and (obj in predicate_list):
-                property_list.append([predicates_table[subj],
-                                        predicates_table[verb],
-                                        predicates_table[obj], head_noun_pos])
-                if term in term_table:
-                    term_table[predicates_table[term]].append([predicates_table[subj],
-                                                                predicates_table[verb],
-                                                                predicates_table[obj], head_noun_pos])
-                else:
-                    term_table[predicates_table[term]] =[[predicates_table[subj],
-                                                            predicates_table[verb],
-                                                            predicates_table[obj], head_noun_pos]]
-                    term_list.append(predicates_table[term])
-                instance_cnt+=1
-
-            # if (term in predicate_list) and (subj in predicate_list) and (verb in predicate_list) and (obj in predicate_list):
-            #     property_list.append([subj,verb,obj, head_noun_pos])
-            #     if term in term_table:
-            #         term_table[term].append([subj,verb,obj, head_noun_pos])
-            #     else:
-            #         term_table[term] =[[subj,verb,obj, head_noun_pos]]
-            #         term_list.append(term)
-            #     instance_cnt+=1
-    print(instance_cnt)
-    # pickle.dump(term_table, open("filtered_relpron.p", "wb"))
-    # print(term_table)
-    return term_table, property_list, term_list
-
-
-def load_men(data_path):
-    # path_men = data_path+'MEN/MEN_dataset_lemma_form.test'
-    path_men = data_path+'MEN/MEN_dataset_lemma_form_full'
-
-    pixie_pred,test_pred,scores, POS = [], [], [],[]
-    with open(path_men) as f:
-        for line in f:
-            word1 = line.split(' ')[0].split('-')[0]
-            word2 = line.split(' ')[1].split('-')[0]
-            pixie_pred.append(word1)
-            pos_name = line.split(' ')[0].split('-')[1]
-            if pos_name=='n':
-                POS.append(0)
-            elif pos_name=='v':
-                POS.append(1)
-            elif pos_name=='j':
-                POS.append(2)
+                oov_flag.append(0)
             else:
-                print("false POS in MEN")
-                assert False
-            test_pred.append(word2)
-            scores.append(float(line.split(' ')[2]))
-    return pixie_pred, test_pred, POS, scores
+                oov_flag.append(1)
+            
+            if term in term_count:
+                term_count[term] +=1
+            else:
+                term_count[term] = 1
+            ranks.append(term_count[term])
+
+    data['term'] = terms
+    data['triples'] = triples
+    data['pos'] = pos
+    data['ranks'] = ranks
+    data['oov'] = oov_flag
+    return data
 
 
-def load_simlek999(data_path):
-    path_simlex = data_path+'SimLex-999/SimLex-999.txt'
-    df = pd.read_csv(path_simlex, delimiter = "\t")
-    pixie_pred = df['word1'].values
-    test_pred = df['word2'].values
+            # # filtering word not in predicate list
+            # if (term in predicate_list) and (subj in predicate_list) and (verb in predicate_list) and (obj in predicate_list):
+            #     property_list.append([predicates_table[subj],
+            #                             predicates_table[verb],
+            #                             predicates_table[obj], head_noun_pos])
+            #     if term in term_table:
+            #         term_table[predicates_table[term]].append([predicates_table[subj],
+            #                                                     predicates_table[verb],
+            #                                                     predicates_table[obj], head_noun_pos])
+            #     else:
+            #         term_table[predicates_table[term]] =[[predicates_table[subj],
+            #                                                 predicates_table[verb],
+            #                                                 predicates_table[obj], head_noun_pos]]
+            #         term_list.append(predicates_table[term])
+            #     instance_cnt+=1
 
-    pos_name = df['POS'].values
-    POS=[]
-    for p in pos_name:
-        if p=='N':
-            POS.append(0)
-        elif p=='V':
-            POS.append(1)
-        elif p=='A':
-            POS.append(2)
-        else:
-            print("False POS for Simlek999 ")
-    scores = df['SimLex999'].values
-
-    return pixie_pred, test_pred, POS, scores
-
-
-def load_gs11(data_path):
-    path_gs11 = data_path+'GS2011data.txt'
-    df = pd.read_csv(path_gs11, delimiter = " ")
-    pixie_preds = df[['subject','verb','object']].values
-    test_pred = df['landmark'].values
-    scores = df['input'].values
-    POS=[1]*len(pixie_preds)
-    return pixie_preds, test_pred, POS, scores
+    return term_table, property_list, term_list
 
 
 class VariationalInferenceModel(nn.Module):
@@ -162,14 +249,11 @@ class VariationalInferenceModel(nn.Module):
         return self.q_mu, q_cov
 
 def generate_vocab(data_path):
+    # generate the vocabulary from the filtered pca transformed data.
     Y_flat = pickle.load(open(data_path+"y_preprocessed.p", "rb"))
     predicate_list, predicate_count = np.unique(np.array(Y_flat).reshape(-1),return_counts=True)
     predicates_table = {w:i for i,w in enumerate(predicate_list)}
     return predicate_list, predicates_table
-
-# def generate_EVA_vocab(path):
-#     data = pickle.load(open(path, "rb"))
-
 
 
 def filter_evaluation_data(dataset, vocab_path, pixie_pred, test_pred, scores, POS=None, EVA_vocab_path=None):
@@ -227,7 +311,7 @@ def filter_evaluation_data(dataset, vocab_path, pixie_pred, test_pred, scores, P
 
 
 
-def evaluate_dataset(dataset , data_path, vocab_path, device, pixie_dim, model_path, EVA_vocab=False):
+def evaluate_dataset(dataset, evaluation_data_path, vocab_path, device, pixie_dim, model_path, EVA_vocab=False):
     def renormalize(pred, score):
         range1 = max(pred)-min(pred)
         range2 = max(score)- min(score)
@@ -236,18 +320,15 @@ def evaluate_dataset(dataset , data_path, vocab_path, device, pixie_dim, model_p
         
     EVA_vocab_path = None   
     if dataset=='MEN':
-        pixie_pred, test_pred, POS, scores = load_men(data_path)
+        pixie_pred, test_pred, POS, scores = load_men(evaluation_data_path)
         EVA_vocab_path = 'filtered_men.p' if EVA_vocab else None
     elif dataset=='Simlek':
-        pixie_pred, test_pred, POS, scores = load_simlek999(data_path)
+        pixie_pred, test_pred, POS, scores = load_simlek999(evaluation_data_path)
         EVA_vocab_path = 'filtered_simlek.p' if EVA_vocab else None
     elif dataset=='RELPRON':
-        term_table, property_list, term_list = load_relpron(data_path, vocab_path)
-        # print(term_table)
-        # print(len(property_list))
-        # EVA_vocab_path = 'filtered_simlek.p' if EVA_vocab else None
+        term_table, property_list, term_list = load_relpron(evaluation_data_path, vocab_path)
     elif dataset=='GS2011':
-        pixie_pred, test_pred, POS, scores  = load_gs11(data_path)
+        pixie_pred, test_pred, POS, scores  = load_gs11(evaluation_data_path)
     else:
         print('wrong dataset')
     # assert False
@@ -312,61 +393,155 @@ def evaluate_dataset(dataset , data_path, vocab_path, device, pixie_dim, model_p
         print("Mean Average Precision score: {}".format(np.mean(APs)))
 
 
+def evaluate_MEN(evaluation_data_path, vocab_path, device, pixie_dim, parameter_path, use_EVA_vocab):
+    data = load_men(evaluation_data_path, vocab_path)
+    if use_EVA_vocab==0:
+        print('vocab coverage: {} out of {}'.format(data.shape[0] - data.oov.sum(), data.shape[0]))
+    else:
+        print('EVA vocab is used. Vocab coverage: {} out of {}'.format(data.shape[0]- data.eva_oov.sum(), data.shape[0]))
 
-        # assert False
+    data = perform_variational_inference(data, device, pixie_dim, parameter_path, vocab_path, use_EVA_vocab)
+    # data.to_csv('MEN_results')
+    return data
 
-        # MAP = 0
-        # APs = []
-        # for term in tqdm(term_list):
-        #     labels = [0]*len(property_list)
-        #     pred_ranks = []
-        #     for idx in range(len(property_list)):
-        #         property = property_list[idx]
-        #         p1 = property[:3]
-        #         p2 = term
-        #         pos = property[3]
-        #         # print(p1,p2,pos)
-        #         # assert False
-        #         all_truths, loss_history = _single_variational_inference(p1,pos,W_mu, W_cov, V, device, pixie_dim)
-        #         rank = np.where(all_truths.numpy().argsort()[::-1]==p1[pos])[0].item()
-        #         pred_ranks.append(all_truths[p2])
-        #         if property in term_table[term]:
-        #             labels[idx]=1
-        #             # pass  # check format of property
+def evaluate_simlek(evaluation_data_path, vocab_path, device, pixie_dim, parameter_path, use_EVA_vocab):
+    data = load_simlek999(evaluation_data_path, vocab_path)
+    if use_EVA_vocab==0:
+        print('vocab coverage: {} out of {}'.format(data.shape[0] - data.oov.sum(), data.shape[0]))
+    else:
+        print('EVA vocab is used. Vocab coverage: {} out of {}'.format(data.shape[0]- data.eva_oov.sum(), data.shape[0]))
 
-        #     APs.append(average_precision_score(labels, pred_ranks))
-        # print("Mean Average Precision score: {}".format(np.mean(APs)))
+    data = perform_variational_inference(data, device, pixie_dim, parameter_path, vocab_path, use_EVA_vocab)
+    # data.to_csv('MEN_results')
+    return data
 
-    
+def evaluate_gs11(evaluation_data_path, vocab_path, device, pixie_dim, parameter_path, use_EVA_vocab):
+    data = load_gs11(evaluation_data_path, vocab_path)
+    if use_EVA_vocab==0:
+        print('vocab coverage: {} out of {}'.format(data.shape[0] - data.oov.sum(), data.shape[0]))
+    else:
+        print('EVA vocab is used. Vocab coverage: {} out of {}'.format(data.shape[0]- data.eva_oov.sum(), data.shape[0]))
 
-def perform_variational_inference(device, pixies, preds, scores, POS, pixie_dim, model_path):
+    data = perform_variational_inference(data, device, pixie_dim, parameter_path, vocab_path, use_EVA_vocab)
+    # data.to_csv('MEN_results')
+    return data
+
+def evaluate_relpron(evaluation_data_path, vocab_path, device, pixie_dim, parameter_path):
+    # contextual dataset always has loose filtering condition
+    data = load_relpron(evaluation_data_path, vocab_path)
+    # data = perform_variational_inference_relpron(data, device, pixie_dim, parameter_path, vocab_path)
+    covered_data = data[data['oov']==0].reset_index()
+    covered_data, truth_mat, rank_mat = perform_variational_inference_relpron(covered_data, device, pixie_dim, parameter_path, vocab_path)
+    pickle.dump((covered_data, truth_mat, rank_mat), open('relpron_result.p','wb'))
+
+    # truth_mat, rank_mat are len(property_list) * len(term_list)
+
+    property_list = covered_data['triples'].to_list()
+    term_list = list(covered_data['term'].unique())
+    pos_list = covered_data['pos'].to_list()
+    term_table = covered_data.groupby('term')['triples'].apply(list).to_dict()
+
+    truth_APs = []
+    rank_APs = []
+
+    # for term, property_list in term_table.items():
+    for j, term in enumerate(term_list):
+        labels = [0]* len(property_list)
+        # pred_ranks = []
+        for i, property in enumerate(property_list):
+            if property in term_table[term]:
+                labels[i]=1
+        truth_APs.append(average_precision_score(labels, truth_mat[:,j] ))
+        rank_APs.append(average_precision_score(labels, rank_mat[:,j] ))
+    print("Mean Average Precision score (truth): {}".format(np.mean(truth_APs)))
+
+    print("Mean Average Precision score (rank): {}".format(np.mean(rank_APs)))
+
+
+
+def perform_variational_inference_relpron(data, device, pixie_dim, parameter_path, vocab_path):
+    def word2int(words):
+        predicate_list, predicates_table = pickle.load(open(vocab_path+'vocabulary.p','rb'))
+        if isinstance(words, str):
+            return predicates_table[words]
+        else:
+            return [predicates_table[word] for word in list(words)]
+
+    W_mu, W_cov, V = load_trained_model(parameter_path, device)
+
+    term_list = list(data['term'].unique())
+    property_list = data['triples'].to_list()
+
+    truth_mat = np.zeros((len(property_list),len(term_list)))
+    rank_mat = np.zeros((len(property_list),len(term_list)))
+
+
+
+    # pred_truth, pred_rank = [],[]
+    for i, row in data.iterrows():
+        # if row['oov']==0:
+        all_truths, loss_history = _single_variational_inference(word2int(row['triples']), row['pos'],W_mu,W_cov,V,device,pixie_dim)
+        for j, term in enumerate(term_list):
+            truth_rank = _get_ranking(all_truths.numpy(), word2int(term_list), word2int(term))
+            # pred_truth.append(all_truths[word2int(term)].item())
+            # pred_rank.append(truth_rank)
+            truth_mat[i,j] = all_truths[word2int(term)].item()
+            rank_mat[i,j] = truth_rank
+        # else:
+        #     pred_truth.append(-1)
+        #     pred_rank.append(-1)
+
+
+    # data['pred_truth'] = pred_truth
+    # data['pred_rank'] = pred_rank
+    return data, truth_mat, rank_mat
+
+
+def perform_variational_inference(data, device, pixie_dim, parameter_path, vocab_path, use_EVA_vocab):
+    def word2int(words):
+        predicate_list, predicates_table = pickle.load(open(vocab_path+'vocabulary.p','rb'))
+        if isinstance(words, str):
+            return predicates_table[words]
+        else:
+            return [predicates_table[word] for word in list(words)]
+
     print("Performing Variational Inference")
-    W_mu, W_cov, V = load_trained_model(model_path, device)
-    loss_history_list = []
-    pred_rank = []
-    pred_truths = []
-    for p1,p2,pos in tqdm(zip(pixies, preds, POS),total=len(pixies)):
-        # print(predicate_list[p1],predicate_list[p2],pos)
-        cnt = 0
-        rank = 101
-        while cnt<3 and rank >5:
-            cnt+=1
-            all_truths, loss_history = _single_variational_inference(p1,pos,W_mu, W_cov, V, device, pixie_dim)
-            # all_truths = all_truths.numpy()
-            if isinstance(p1,list):
-                rank = np.where(all_truths.numpy().argsort()[::-1]==p1[pos])[0].item()
+    W_mu, W_cov, V = load_trained_model(parameter_path, device)
+
+    pred_truth, pred_rank = [], []
+    for index, row in data.iterrows():
+        if  use_EVA_vocab==0:
+            if row['oov']==0:
+                all_truths, loss_history = _single_variational_inference(word2int(row['word1']), row['pos'],W_mu,W_cov,V,device,pixie_dim)
+                # row['pred_truth'] = all_truths[word2int(row['word2'])]
+                truth_rank = _get_ranking(all_truths.numpy(), word2int(data[data['oov']==0]['word2']), word2int(row['word2']))
+                # row['pred_rank'] = truth_rank
+                pred_truth.append(all_truths[word2int(row['word2'])].item())
+                pred_rank.append(truth_rank)
             else:
-                rank = np.where(all_truths.numpy().argsort()[::-1]==p1)[0].item()
-        # evaluation
-        loss_history_list.append(loss_history)
-        truth_rank = _get_ranking(all_truths.numpy(), preds, p2)
-        # print('length of pred:',all_truths[-50:])
-        print(truth_rank)
-        pred_rank.append(truth_rank)
-        pred_truths.append(all_truths[p2])
-    return pred_rank, pred_truths
+                pred_truth.append(-1)
+                pred_rank.append(-1)
+        else:
+            if row['oov']==0 and row['eva_oov']==0:
+                all_truths, loss_history = _single_variational_inference(word2int(row['word1']), row['pos'],W_mu,W_cov,V,device,pixie_dim)
+                # row['pred_truth'] = all_truths[word2int(row['word2'])]
+                truth_rank = _get_ranking(all_truths.numpy(), word2int(data[data['oov']==0]['word2']), word2int(row['word2']))
+                # row['pred_rank'] = truth_rank
+                pred_truth.append(all_truths[word2int(row['word2'])].item())
+                pred_rank.append(truth_rank)
+            else:
+                pred_truth.append(-1)
+                pred_rank.append(-1)
+
+    data['pred_truth'] = pred_truth
+    data['pred_rank'] = pred_rank
+    return data
+
+
 
 def _get_ranking(all_truths, pred_list, pred):
+    # return the ranking of truth of word2 in word2_list
+    # Higher truth value, higher ranking
     sorted_truth = np.sort(all_truths)
     truth_index = np.argsort(all_truths)
     cnt=0
@@ -377,7 +552,7 @@ def _get_ranking(all_truths, pred_list, pred):
             return cnt
 
 def _single_variational_inference(pred,pos,W_mu, W_cov, V, device,pixie_dim):
-    lr, epoch_num =  0.03,  1000
+    lr, epoch_num =  0.03,  800
 
     if not isinstance(pred,list):
         model = VariationalInferenceModel(pixie_dim)   # here depends on the dataset
@@ -398,12 +573,12 @@ def _single_variational_inference(pred,pos,W_mu, W_cov, V, device,pixie_dim):
             pred_loss = approx_E_log_sig(q_mu, q_cov, torch.unsqueeze(V[pred],0)) \
                         - torch.log(torch.sum(approx_E_sig(q_mu, q_cov, V)))
         
-            loss = 0.05*Dqp - pred_loss
+            loss = 0.07*Dqp - pred_loss
             loss.backward()
             optimizer.step()  
             scheduler.step()
             loss_history.append(loss.item())
-        print(Dqp.item(), pred_loss.item())
+        print('ELBO-prior: ', Dqp.item(), 'ELBO-likelihood: ', pred_loss.item())
         all_truths = approx_E_sig(q_mu, q_cov, V).cpu().detach()
         return all_truths, loss_history
     else:
@@ -428,7 +603,7 @@ def _single_variational_inference(pred,pos,W_mu, W_cov, V, device,pixie_dim):
                 pred_loss += approx_E_log_sig(q_mu_pos, q_cov_pos, torch.unsqueeze(V[pred[i]],0)) \
                             - torch.log(torch.sum(approx_E_sig(q_mu_pos, q_cov_pos, V)))
         
-            loss = 0.15*Dqp - pred_loss
+            loss = 0.1*Dqp - pred_loss
             loss.backward()
             optimizer.step()  
             scheduler.step()
@@ -436,35 +611,64 @@ def _single_variational_inference(pred,pos,W_mu, W_cov, V, device,pixie_dim):
             # if epoch%500 == 0:
             #     print(Dqp.item(), pred_loss.item())
             #     print(torch.sum(torch.mul((q_mu-W_mu).T, torch.matmul(torch.inverse(W_cov),(q_mu-W_mu).T))).item())
-        print(Dqp.item(), pred_loss.item())
+        print('ELBO-prior: ', Dqp.item(), 'ELBO-likelihood: ', pred_loss.item())
+
         q_mu_pos = q_mu[pixie_dim*pos:pixie_dim*(pos+1)]
         q_cov_pos = q_cov[pixie_dim*pos:pixie_dim*(pos+1),pixie_dim*pos:pixie_dim*(pos+1)]
         all_truths = approx_E_sig(q_mu_pos, q_cov_pos, V).cpu().detach()
         return all_truths, loss_history
+        
+
+def calculate_spearman(data, use_eva_vocab):
+    if use_eva_vocab:
+        covered_data = data[data['eva_oov']==0]
+    else:
+        covered_data = data[data['oov']==0]
+
+    truth_score = stats.spearmanr(covered_data['pred_truth'], covered_data['reference_scores']).correlation
+    ranking_score = stats.spearmanr(covered_data['pred_rank'], covered_data['reference_scores']).correlation
+    print("Spearman correlation truth score: {}".format(truth_score))
+    print("Spearman correlation ranking score: {}".format(ranking_score))
+        
 
 if __name__ == '__main__':
+    # Run the evaluation to generate prediction files.
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--pixie_dim', type=int, default=100, help='dimension of pixie')
+    # The datasets could be 'MEN', 'Simlek', 'RELPRON', 'GS2011'
     parser.add_argument('--dataset', type=str, default='MEN', help='evaluation dataset')
-    parser.add_argument('--data_path', type=str, default='pixie_data/', help='path to save data')
+    # The path for evaluation datasets
+    parser.add_argument('--evaluation_data_path', type=str, default='pixie_data/', help='path to save data')
+    # This is the data you used to generate the vocabulary
     parser.add_argument('--pca_path', type=str, default='data_pca/', help='path to save PCA data')
     parser.add_argument('--parameter_path', type=str, default='parameters/', help='path to save parameters')
     parser.add_argument('--use_EVA_vocab', type=bool , default=False, help='if using EVA filtered vocab')
 
     args = parser.parse_args()
 
-    work_path = "/local/scratch/yl535/"
-    vocab_path = '/local/scratch/yl535/'+args.data_path+args.pca_path
+    # The path of evaluation datasets
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    # X_eval, Y_eval, POS, scores = load_men(data_path)
-    # X_eval, Y_eval, scores = load_gs11(data_path)t
 
-    # print(X_eval[0])
-    # print(Y_eval[0])
-    # print(np.unique(POS))
-    # print(max(scores), min(scores))
 
-    # covered_pixies, covered_preds, covered_POS, covered_scores = evaluate_men(data_path)
-    # print(covered_pixies, covered_preds,covered_scores)
-    # predicate_list, predicates_table = generate_vocab(data_path+'pixie_data/data_pca_2/')   
-    evaluate_dataset(args.dataset, work_path, vocab_path, device, args.pixie_dim, args.parameter_path, args.use_EVA_vocab)
+    # evaluate_dataset(args.dataset, args.evaluation_data_path, args.pca_path, device, args.pixie_dim, args.parameter_path, args.use_EVA_vocab)
+
+    if args.dataset == 'MEN':
+        data = evaluate_MEN(args.evaluation_data_path, args.pca_path, device, args.pixie_dim, args.parameter_path, args.use_EVA_vocab)
+        data.to_csv('MEN_result.csv')
+        calculate_spearman(data, args.use_EVA_vocab)
+
+    elif args.dataset == 'simlek':
+        data = evaluate_simlek(args.evaluation_data_path, args.pca_path, device, args.pixie_dim, args.parameter_path, args.use_EVA_vocab)
+        data.to_csv('simlek_result.csv')
+        calculate_spearman(data, args.use_EVA_vocab)
+
+    elif args.dataset == 'GS2011':
+        data = evaluate_gs11(args.evaluation_data_path, args.pca_path, device, args.pixie_dim, args.parameter_path, args.use_EVA_vocab)
+        data.to_csv('gs11_result.csv')
+        calculate_spearman(data, args.use_EVA_vocab)
+
+    elif args.dataset == 'relpron':
+        # data = load_relpron(args.evaluation_data_path, args.pca_path)
+        evaluate_relpron(args.evaluation_data_path, args.pca_path, device, args.pixie_dim, args.parameter_path)
+        pass

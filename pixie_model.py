@@ -5,6 +5,7 @@ from torch.utils.data import Dataset,DataLoader
 import torchvision.transforms as transforms
 from torchtext.data.utils import get_tokenizer
 import numpy as np
+import os
 
 import pickle
 from tqdm import tqdm
@@ -120,7 +121,7 @@ def train_world_model(pixie_dim, num_semroles, data_path, parameter_path):
     world_model = WorldModel(pixie_dim, num_semroles)
     x = pickle.load(open(data_path+"x_preprocessed.p", "rb"))
     mu_batch, cov_batch = world_model.estimate_parameters(torch.Tensor(x).reshape(-1,3*pixie_dim))
-    # world_model.modify_conditional_independecy()
+    world_model.modify_conditional_independecy()
 
     pickle.dump([world_model.W_mu.cpu().detach(), world_model.W_cov.cpu().detach()],
                  open(parameter_path+"world_parameters.p", "wb"))
@@ -205,22 +206,19 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--pixie_dim', type=int, default=100, help='dimension of pixie')
-    parser.add_argument('--data_path', type=str, default='pixie_data/', help='path to save data')
     parser.add_argument('--parameter_path', type=str, default='parameters/', help='path to save parameters')
-    parser.add_argument('--pca_path', type=str, default='data_pca/', help='path to save PCA data')
+    parser.add_argument('--pca_path', type=str, default='pca_data/', help='path to save PCA data')
     parser.add_argument('--lr', type=float, default=0.01, help='learning rate')
     parser.add_argument('--dr', type=float, default=5e-8, help='decay rate')
     parser.add_argument('--epoch_num', type=int, default=20, help='number of epoch')
     args = parser.parse_args()
 
-    work_path = '/local/scratch/yl535/'
-    data_path = work_path + args.data_path + args.pca_path
-    save_path_lexicon = 'Lexical_parameters.p'
+    # work_path = '/local/scratch/yl535/'
+    # data_path = work_path + args.data_path + args.pca_path
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     pixie_dim = args.pixie_dim
+    if not os.path.isdir(args.parameter_path): os.mkdir(args.parameter_path)
 
     num_semroles = 2
-    train_world_model(pixie_dim, num_semroles, data_path, args.parameter_path)
-    
-    # predicate_list, predicates_table = generate_vocab(data_path)
-    train_lexicon_model(pixie_dim, device, data_path, args.parameter_path, args.lr, args.dr, args.epoch_num)
+    train_world_model(pixie_dim, num_semroles, args.pca_path, args.parameter_path)    
+    train_lexicon_model(pixie_dim, device, args.pca_path, args.parameter_path, args.lr, args.dr, args.epoch_num)

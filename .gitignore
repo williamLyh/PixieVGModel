@@ -1,7 +1,9 @@
+# all folders
+*/
 
-runs/
 # all pickle files and parameters files
 *.p
+*.csv
 parameters/
 
 # all images
@@ -15,3 +17,7 @@ __pycache__
 
 # experiment files
 scratch.py
+model_examination.py
+
+# all shell files
+*.sh

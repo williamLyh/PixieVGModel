@@ -31,6 +31,7 @@ def load_VG_obj(obj_path):
 def clean_string(s):
     return s.strip().replace(' ','|').lower()
 
+
 def generate_objects_vocab(obj_path, min_freq=30):
     print('generating object filtering checklist')
     all_objects={}
@@ -263,53 +264,15 @@ def features_PCA(data_path, pca_path,pixie_dim_new):
 
     pickle.dump(torch.Tensor(X_pca).reshape(-1,3,pixie_dim_new), open(pca_path+"x_preprocessed.p", "wb"))
     pickle.dump(y_batch, open(pca_path+"y_preprocessed.p", "wb"))
-
-# def features_PCA(data_path, pca_path,pixie_dim_new):
-#     pixie_dim = 1000
-#     cov_global = torch.zeros(pixie_dim,pixie_dim)
-#     data_size = 0
-#     batch_number = 10
-
-#     for itr in tqdm(range(batch_number)):
-#         x_hidden = pickle.load(open(data_path+"x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
-#         diff = x_hidden - torch.mean(x_hidden,0)
-#         cov_batch = torch.matmul(diff.T,diff)/x_hidden.shape[0]
-#         cov_global = cov_global*(data_size/(data_size+x_hidden.shape[0])) \
-#                     + cov_batch*(x_hidden.shape[0]/(data_size+x_hidden.shape[0]))
-        
-#         data_size += x_hidden.shape[0]
-        
-#     # PCA transform matrix
-#     eigen_vals, eigen_vecs = np.linalg.eig(cov_global)
-#     eigen_vecs_sorted = eigen_vecs[:,eigen_vals.argsort()[::-1]]
-#     eigen_vals_sorted = sorted(eigen_vals, reverse=True)
-#     x_eigenval = np.array(eigen_vals_sorted[:pixie_dim_new])
-#     PCA_transform_matrix = eigen_vecs_sorted[:,:pixie_dim_new]
-#     # PCA transforming 
-#     x_batch = []
-#     y_batch = []
-#     for itr in tqdm(range(batch_number)):
-#         x_hidden = pickle.load(open(data_path+"x_{}.p".format(itr), "rb")).reshape(-1, pixie_dim)
-#         Y_flat = pickle.load(open(data_path+"y_{}.p".format(itr), "rb"))
-#         x_pca = x_hidden.numpy().dot(PCA_transform_matrix)
-#         # first rescaling to bring the numbers down
-#         # det -> 1, coefficient is *1.29"
-#         x_pca = x_pca /pow(x_eigenval,1) *10
-#         x_batch.append(torch.Tensor(x_pca))
-#         y_batch.append(Y_flat)
-
-#     x_batch = torch.cat(x_batch)
-#     y_batch = np.concatenate(y_batch)
-#     # further rescaling the data so that the covariance will have diagonal entries close to 1 and therefore det close to 1
-#     # need to recompute the eigenvalues
-#     # cov = get_cov(x_batch)
-#     # w, _ = np.linalg.eig(cov)
-#     # x_batch = x_batch * np.sqrt(w)/np.product(np.array([pow(e,1/pixie_dim) for e in w]))
-
-#     pickle.dump(x_batch.reshape(-1,3,pixie_dim_new), open(pca_path+"x_preprocessed.p", "wb"))
-#     pickle.dump(y_batch, open(pca_path+"y_preprocessed.p", "wb"))
-
             
+def generate_vocab(data_path):
+    # generate the vocabulary from the filtered pca transformed data.
+    Y_flat = pickle.load(open(data_path+"y_preprocessed.p", "rb"))
+    predicate_list, predicate_count = np.unique(np.array(Y_flat).reshape(-1),return_counts=True)
+    predicates_table = {w:i for i,w in enumerate(predicate_list)}
+    pickle.dump((predicate_list, predicates_table), open(data_path+'vocabulary.p','wb'))
+    return predicate_list, predicates_table
+
 
 def plot_example(idx, re_idx, work_path, relations):
     img_id = relations.iloc[idx]['image_id']
@@ -341,25 +304,32 @@ def plot_example(idx, re_idx, work_path, relations):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--pixie_dim', type=int, default=100, help='dimension of pixie')
-    parser.add_argument('--data_path', type=str, default='pixie_data/', help='path to save data')
-    parser.add_argument('--pca_path', type=str, default='data_pca/', help='path to save PCA data')
+    # This is the directory of your objects.json and relationships.json files
+    parser.add_argument('--VG_path', type=str, default='/local/scratch/yl535/visualgeno/', help='path to the VG data')
+    # The directory of filtered and transformed data
+    parser.add_argument('--data_path', type=str, default='pixie_data/', help='Path to save data')
+    # The directory of the PCA transformed data
+    parser.add_argument('--pca_path', type=str, default='data_pca/', help='Path to save PCA data')
+
+    parser.add_argument('--pca_only', type=bool, default=True, help='If only runs the pca')
     parser.add_argument('--min_freq', type=int, default=30, help='Filtering out low frequent words')
     args = parser.parse_args()
 
     print('Processing the Visual Genome data')
-    VG_path = '/local/scratch/yl535/visualgeno/'
-    obj_path = VG_path+'objects.json.zip'
-    rel_path = VG_path+'relationships.json.zip'
-    data_path = '/local/scratch/yl535/'+args.data_path
-    pca_path = data_path + args.pca_path
-    if not os.path.isdir(data_path): os.mkdir(data_path)
-    if not os.path.isdir(pca_path): os.mkdir(pca_path)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
+    if not args.pca_only:
+        if not os.path.isdir(args.data_path ): os.mkdir(args.data_path )
+        obj_path = args.VG_path+'objects.json.zip'
+        rel_path = args.VG_path+'relationships.json.zip'
 
-    # filtered_objects_counts, all_objects = generate_objects_vocab(obj_path, args.min_freq)
-    # rels_checklist, _ = generate_rels_checklist(rel_path, list(filtered_objects_counts.keys()), all_objects, args.min_freq)
-    # filter_relations(rel_path, data_path, device, all_objects, rels_checklist)
-    features_PCA(data_path, pca_path, pixie_dim_new=args.pixie_dim)
+        filtered_objects_counts, all_objects = generate_objects_vocab(obj_path, args.min_freq)
+        rels_checklist, _ = generate_rels_checklist(rel_path, list(filtered_objects_counts.keys()), all_objects, args.min_freq)
+        filter_relations(rel_path, args.data_path, device, all_objects, rels_checklist)
+
+    if not os.path.isdir(args.pca_path): os.mkdir(args.pca_path)
+    features_PCA(args.data_path, args.pca_path, pixie_dim_new=args.pixie_dim)
+
+    _, _ = generate_vocab(args.pca_path)
 
