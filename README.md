@@ -1,3 +1,5 @@
+I'm still cleaning up this repo. Will release the final version soon.
+
 # PixieModel
 ### Evaluation datasets
 MEN: https://aclweb.org/aclwiki/MEN_Test_Collection_(State_of_the_art) 
